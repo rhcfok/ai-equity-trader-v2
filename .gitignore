@@ -1,0 +1,22 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Local runtime output and audits
+out/
+.validation/
+jlaw_yahoo_run.json
+jlaw_yahoo_audits/
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
