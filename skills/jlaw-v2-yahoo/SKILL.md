@@ -1,5 +1,5 @@
 ---
-name: jlaw-trading-doctrine
+name: jlaw-v2-yahoo
 description: Apply J Law's (JLawStock) trading doctrine — market regime gating, buy/sell checklists, position management rules, and the MRA review loop — to screener output and current holdings. Use when asked to run a J Law-style daily routine, evaluate breakout candidates against his buy checklist, check holdings against his sell checklist, or produce the end-of-day MRA journal.
 icon: trending-up
 color: Green
