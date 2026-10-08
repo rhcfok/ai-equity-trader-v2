@@ -13,6 +13,9 @@ This repository contains the **deterministic JLaw Yahoo OHLCV Model v2.0** skill
 | `skills/jlaw-yahoo-runner/scripts/requirements.txt` | Minimal runtime dependency declaration. |
 | `skills/jlaw-yahoo-runner/references/yahoo-model.md` | Technical scoring rubric and Yahoo data contract. |
 | `skills/jlaw-yahoo-runner/templates/` | Sanitized environment-variable and US-watchlist examples. |
+| `skills/jlaw-trading-doctrine/SKILL.md` | Doctrine layer: regime gating, buy/sell checklists, and MRA loop applied to runner output and holdings. |
+| `skills/jlaw-trading-doctrine/scripts/jlaw_checklist.py` | Deterministic gate evaluator (stdlib only): classifies runner candidates A+/Valid/Watch/Skip and flags holding actions. |
+| `skills/jlaw-trading-doctrine/references/` | Distilled J Law methodology, official checklists, rules, daily routine, and glossary. |
 
 No production credentials, Supabase keys, live watchlists, historical audits, or result exports are included.
 
