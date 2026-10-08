@@ -21,3 +21,4 @@ jlaw_yahoo_audits/
 .vscode/
 .idea/
 skills/jlaw-yahoo-runner/run_stderr*.log
+skills/jlaw-v2-yahoo/out/

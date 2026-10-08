@@ -48,6 +48,9 @@ candidates, this skill judges them the way J Law would.
 | `JLAW_MAX_BASE_RANGE_PCT` | `15` | Max base range % (tightness proxy; J Law's pivot-area rule is ≤10%). |
 | `JLAW_MAX_OFF_HIGH_PCT` | `25` | Max % below 52-week high (leaders stay near highs). |
 | `JLAW_REGIME` | `Neutral` | `Risk-On` / `Neutral` / `Risk-Off` — from the weekly MYT 股市分析 or manual call. |
+| `SUPABASE_URL` | unset | Supabase project/PostgREST URL — needed only for `--write-supabase`. |
+| `SUPABASE_KEY` | unset | Key authorized for the doctrine table. |
+| `SUPABASE_V2_TABLE` | `trade-jlaw-v2` | Doctrine results table. |
 
 ## Operating Workflow
 
@@ -95,6 +98,26 @@ Classifications: **A+ setup** (all gates, score ≥15) · **Valid** (all gates) 
 `holdings` writes JSON: per-position `action` ∈
 `STOP_HIT`, `CUT_LOSS_GT_8PCT`, `RAISE_STOP_TO_BREAKEVEN` (≥1R),
 `TRIM_20_33PCT` (+15–20%), `WARNING_*`, `HOLD`.
+
+## Supabase publication
+
+Add `--write-supabase` to `screen` only after the operator approves result
+publication. Candidates are upserted into `"trade-jlaw-v2"` with a
+`unique (run_date, symbol)` constraint — same-date reruns replace rows and
+never duplicate them. Do not write Skip rows (default output excludes them).
+
+Table schema (already created by migration `create_trade_jlaw_v2`):
+
+| Column | Type | Source |
+|---|---|---|
+| `run_date` | date | runner run date |
+| `regime` | text | `JLAW_REGIME` at evaluation time |
+| `symbol`, `classification` | text | evaluator verdict |
+| `jlaw_score`, `current_price`, `entry_price`, `stop_loss`, `target_price` | numeric | runner row |
+| `rrr`, `chase_pct`, `stop_pct`, `pct_above_50ma` | numeric | computed gates |
+| `vcp_stage` | text / `pocket_pivot` | bool | runner row |
+| `gates` | jsonb | full gate detail |
+| `failed_gates`, `unknown_gates` | text[] | gate names |
 
 ## Failure Handling
 

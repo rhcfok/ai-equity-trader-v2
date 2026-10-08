@@ -17,6 +17,7 @@ import csv
 import json
 import os
 import sys
+import urllib.request
 
 
 def _f(env, default):
@@ -138,6 +139,71 @@ def classify(score, gates):
     return "Skip", failed, unknown
 
 
+def upsert_supabase(doc):
+    """Upsert screen candidates into the Supabase doctrine table.
+
+    Env: SUPABASE_URL, SUPABASE_KEY, SUPABASE_V2_TABLE (default trade-jlaw-v2).
+    Uses the PostgREST upsert with the unique (run_date, symbol) constraint —
+    same-date reruns replace rows, never duplicate them.
+    """
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_KEY", "")
+    table = os.environ.get("SUPABASE_V2_TABLE", "trade-jlaw-v2")
+    if not url or not key:
+        print(json.dumps({"ok": False,
+                          "error": "SUPABASE_URL / SUPABASE_KEY not set"}))
+        return 2
+    if not url.endswith("/rest/v1"):
+        url = url + "/rest/v1"
+    rows = []
+    for c in doc["candidates"]:
+        g = c.get("gates") or {}
+        rows.append({
+            "run_date": doc.get("run_date"),
+            "regime": doc.get("regime"),
+            "symbol": c.get("symbol"),
+            "classification": c.get("classification"),
+            "jlaw_score": c.get("jlaw_score"),
+            "current_price": c.get("current_price"),
+            "entry_price": c.get("entry_price"),
+            "stop_loss": c.get("stop_loss"),
+            "target_price": c.get("target_price"),
+            "rrr": c.get("rrr"),
+            "chase_pct": g.get("chase_pct"),
+            "stop_pct": g.get("stop_pct"),
+            "pct_above_50ma": g.get("pct_above_50ma"),
+            "vcp_stage": g.get("vcp_stage"),
+            "pocket_pivot": g.get("pocket_pivot"),
+            "gates": g,
+            "failed_gates": c.get("failed_gates") or [],
+            "unknown_gates": c.get("unknown_gates") or [],
+        })
+    if not rows:
+        return 0
+    body = json.dumps(rows).encode("utf-8")
+    req = urllib.request.Request(
+        f"{url}/{table}?on_conflict=run_date,symbol",
+        data=body,
+        method="POST",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+        return 0
+    except urllib.error.HTTPError as e:
+        print(json.dumps({"ok": False, "error": f"supabase HTTP {e.code}",
+                          "detail": e.read().decode("utf-8", "ignore")[:500]}))
+        return 2
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"supabase upsert failed: {e}"}))
+        return 2
+
+
 def cmd_screen(args):
     with open(args.input, encoding="utf-8") as f:
         data = json.load(f)
@@ -182,9 +248,16 @@ def cmd_screen(args):
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(text)
+    rc = 0
+    if args.write_supabase:
+        rc = upsert_supabase(doc)
+        if rc != 0:
+            return rc
     print(text if not args.output else
           json.dumps({"ok": True, "path": args.output, "summary": counts,
-                      "regime": CFG["regime"]}, ensure_ascii=False))
+                      "regime": CFG["regime"],
+                      "supabase_upserted": len(doc["candidates"]) if args.write_supabase else 0},
+                     ensure_ascii=False))
     return 0
 
 
@@ -265,6 +338,8 @@ def main():
     s.add_argument("--input", required=True, help="jlaw-yahoo-runner JSON output")
     s.add_argument("--output")
     s.add_argument("--all", action="store_true", help="include Skip rows")
+    s.add_argument("--write-supabase", action="store_true",
+                   help="upsert candidates to SUPABASE_V2_TABLE (default trade-jlaw-v2); requires SUPABASE_URL/SUPABASE_KEY")
     s.set_defaults(fn=cmd_screen)
     h = sub.add_parser("holdings")
     h.add_argument("--holdings", required=True,
