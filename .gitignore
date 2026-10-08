@@ -20,3 +20,4 @@ jlaw_yahoo_audits/
 .DS_Store
 .vscode/
 .idea/
+skills/jlaw-yahoo-runner/run_stderr*.log
