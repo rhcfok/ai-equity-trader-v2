@@ -54,13 +54,38 @@ candidates, this skill judges them the way J Law would.
 
 ## Operating Workflow
 
+### Default universe: the entire watchlist table
+
+Unless the user names explicit tickers, this pipeline's screening universe
+is **every symbol in the Supabase `watchlist` table — all categories, no
+filter** (core, satellite, watch1, watch2+, hedges — everything). The
+sister pipeline `jlaw-v2-chart` covers only the core/satellite/watch1
+subset visually; this pipeline is the quantitative sweep of the full list.
+
+Fetch symbols from Supabase (project `vmxxmdtzvwizrpjrrvnp`), e.g.:
+
+```sql
+select symbol from watchlist;
+```
+
+Save the comma-separated list (e.g. `watchlist_all.txt`) and pass it to the
+runner:
+
+```bash
+python3 repo/skills/jlaw-yahoo-runner/scripts/jlaw_yahoo_runner.py \
+  --symbols "$(cat watchlist_all.txt)" --output out/jlaw_$(date -u +%F).json
+```
+
+Symbols the runner cannot score (insufficient history) are reported as
+skipped, never silently dropped.
+
 ### Daily routine (mirrors 每天交易部署流程)
 
 1. **Regime first.** Set `JLAW_REGIME` from the latest weekly stance
    (MYT 股市分析 labels the market Risk-On / Neutral / Risk-Off; as of
    1 Oct 2026 it was Risk-On). If Risk-Off: report capital-preservation mode
    and do not promote new buys.
-2. **Screen.** Run `jlaw-yahoo-runner` (or use its latest JSON), then:
+2. **Screen.** Run `jlaw-yahoo-runner` over the default universe (above), then:
 
 ```bash
 python3 <skill_dir>/scripts/jlaw_checklist.py screen \
@@ -103,14 +128,21 @@ Classifications: **A+ setup** (all gates, score ≥15) · **Valid** (all gates) 
 
 Add `--write-supabase` to `screen` only after the operator approves result
 publication. Candidates are upserted into `"trade-jlaw-v2"` with a
-`unique (run_date, symbol)` constraint — same-date reruns replace rows and
-never duplicate them. Do not write Skip rows (default output excludes them).
+`unique (run_date, symbol, jlaw_review_type)` constraint — same-date reruns
+of the same review type replace rows and never duplicate them. Rows written
+by this skill carry `jlaw_review_type = "yahoo"`; the chart-review skill
+(`jlaw-v2-chart`) writes its own rows for the same date/symbol with
+`"chart"`, so the two pipelines can run in parallel without overwriting
+each other. **All scored records are upserted** (A+/Valid/Watch/Skip alike —
+the full day stays auditable); the `--all` flag only controls whether the
+local JSON lists Skip rows and does not affect the upsert.
 
 Table schema (already created by migration `create_trade_jlaw_v2`):
 
 | Column | Type | Source |
 |---|---|---|
 | `run_date` | date | runner run date |
+| `jlaw_review_type` | text | `"yahoo"` from this skill, `"chart"` from jlaw-v2-chart (part of the unique key) |
 | `regime` | text | `JLAW_REGIME` at evaluation time |
 | `symbol`, `classification` | text | evaluator verdict |
 | `jlaw_score`, `current_price`, `entry_price`, `stop_loss`, `target_price` | numeric | runner row |
@@ -125,5 +157,15 @@ Table schema (already created by migration `create_trade_jlaw_v2`):
   candidate capped at **Watch**.
 - Missing holdings file → skip the holdings stage with an explicit note.
 - Regime unknown → treat as `Neutral` and say so.
+
+## Sister pipeline: visual review (jlaw-v2-chart)
+
+This pipeline and **`jlaw-v2-chart`** run **independently and in parallel**:
+this skill sweeps the entire `watchlist` quantitatively; `jlaw-v2-chart`
+visually reviews the `core` / `satellite` / `watch1` subset on TradingView.
+Both upsert to `trade-jlaw-v2` under `unique (run_date, symbol,
+jlaw_review_type)` — rows are told apart by `jlaw_review_type`
+(`yahoo` vs `chart`) and never overwrite each other. Where both cover the
+same symbol, a failing chart overrides a flattering score.
 
 *This is research and analysis only, not personalized financial advice.*

@@ -139,12 +139,15 @@ def classify(score, gates):
     return "Skip", failed, unknown
 
 
-def upsert_supabase(doc):
-    """Upsert screen candidates into the Supabase doctrine table.
+def upsert_supabase(doc, rows_in):
+    """Upsert ALL scored records into the Supabase doctrine table.
 
     Env: SUPABASE_URL, SUPABASE_KEY, SUPABASE_V2_TABLE (default trade-jlaw-v2).
-    Uses the PostgREST upsert with the unique (run_date, symbol) constraint —
-    same-date reruns replace rows, never duplicate them.
+    Uses the PostgREST upsert with the unique
+    (run_date, symbol, jlaw_review_type) constraint — same-date reruns of the
+    same review type replace rows, never duplicate them. Rows from this
+    script always carry jlaw_review_type="yahoo"; the chart-review layer
+    (jlaw-v2-chart) writes its own rows with "chart".
     """
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     key = os.environ.get("SUPABASE_KEY", "")
@@ -156,10 +159,11 @@ def upsert_supabase(doc):
     if not url.endswith("/rest/v1"):
         url = url + "/rest/v1"
     rows = []
-    for c in doc["candidates"]:
+    for c in rows_in:
         g = c.get("gates") or {}
         rows.append({
             "run_date": doc.get("run_date"),
+            "jlaw_review_type": os.environ.get("JLAW_REVIEW_TYPE", "yahoo"),
             "regime": doc.get("regime"),
             "symbol": c.get("symbol"),
             "classification": c.get("classification"),
@@ -182,7 +186,7 @@ def upsert_supabase(doc):
         return 0
     body = json.dumps(rows).encode("utf-8")
     req = urllib.request.Request(
-        f"{url}/{table}?on_conflict=run_date,symbol",
+        f"{url}/{table}?on_conflict=run_date,symbol,jlaw_review_type",
         data=body,
         method="POST",
         headers={
@@ -209,6 +213,7 @@ def cmd_screen(args):
         data = json.load(f)
     results = data.get("results", data if isinstance(data, list) else [])
     out = []
+    all_rows = []  # every scored symbol — the upsert set
     counts = {"A+ setup": 0, "Valid": 0, "Watch": 0, "Skip": 0}
     for r in results:
         if r.get("data_status") != "ok":
@@ -216,9 +221,7 @@ def cmd_screen(args):
         gates = eval_gates(r)
         cls, failed, unknown = classify(_num(r.get("jlaw_score")), gates)
         counts[cls] += 1
-        if cls == "Skip" and not args.all:
-            continue
-        out.append({
+        row = {
             "symbol": r.get("symbol"),
             "classification": cls,
             "jlaw_score": r.get("jlaw_score"),
@@ -230,7 +233,11 @@ def cmd_screen(args):
             "gates": {k: v for k, v in gates.items()},
             "failed_gates": failed,
             "unknown_gates": unknown,
-        })
+        }
+        all_rows.append(row)
+        if cls == "Skip" and not args.all:
+            continue
+        out.append(row)
     order = {"A+ setup": 0, "Valid": 1, "Watch": 2, "Skip": 3}
     out.sort(key=lambda x: (order[x["classification"]], -(x["jlaw_score"] or 0)))
     doc = {
@@ -250,13 +257,15 @@ def cmd_screen(args):
             f.write(text)
     rc = 0
     if args.write_supabase:
-        rc = upsert_supabase(doc)
+        # All scored records are upserted (A+/Valid/Watch/Skip alike);
+        # --all only controls what the local JSON lists.
+        rc = upsert_supabase(doc, all_rows)
         if rc != 0:
             return rc
     print(text if not args.output else
           json.dumps({"ok": True, "path": args.output, "summary": counts,
                       "regime": CFG["regime"],
-                      "supabase_upserted": len(doc["candidates"]) if args.write_supabase else 0},
+                      "supabase_upserted": len(all_rows) if args.write_supabase else 0},
                      ensure_ascii=False))
     return 0
 
