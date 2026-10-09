@@ -8,12 +8,14 @@ A credential-free, three-stage pipeline that enriches `trade-jlaw-v2` rows with 
 
 | Path | Purpose |
 |---|---|
-| `runners/fetch_unusual_whales_option_data.py` | Builds a connector request manifest from `trade-jlaw-v2`. |
-| `runners/transform_unusual_whales_option_data.py` | Converts connector-saved daily-state snapshots into validated `option_*` values. |
-| `runners/report_trade_jlaw_v2_option_breakouts.py` | Creates Markdown/CSV reports and can patch only option fields with explicit `--apply`. |
-| `runners/trade_jlaw_v2_option_contract.py` | Whitelisted 18-field update contract. |
+| `SKILL.md` | End-to-end operational workflow for all three stages. |
+| `scripts/fetch_unusual_whales_option_data.py` | Builds a connector request manifest from `trade-jlaw-v2`. |
+| `scripts/transform_unusual_whales_option_data.py` | Converts connector-saved daily-state snapshots into validated `option_*` values. |
+| `scripts/report_trade_jlaw_v2_option_breakouts.py` | Creates Markdown/CSV reports and can patch only option fields with explicit `--apply`. |
+| `scripts/trade_jlaw_v2_option_contract.py` | Whitelisted 18-field update contract. |
 | `tests/` | Fixture-based regression tests for the three stages. |
-| `skills/` | Standalone agent skills for each stage and end-to-end orchestration. |
+
+This is the single canonical package location. The repository no longer contains a separate `UW-option-breakout/` root folder or duplicated split packages.
 
 ## Execution sequence
 

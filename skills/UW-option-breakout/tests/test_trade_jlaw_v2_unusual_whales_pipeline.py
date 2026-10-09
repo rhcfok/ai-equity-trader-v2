@@ -11,7 +11,7 @@ from pathlib import Path
 import pandas as pd
 
 BUNDLE = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(BUNDLE / "runners"))
+sys.path.insert(0, str(BUNDLE / "scripts"))
 
 from fetch_unusual_whales_option_data import build_manifest, normalize_rows
 from report_trade_jlaw_v2_option_breakouts import report_rows
