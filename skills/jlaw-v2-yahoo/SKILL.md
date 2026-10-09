@@ -54,29 +54,29 @@ candidates, this skill judges them the way J Law would.
 
 ## Operating Workflow
 
-### Default universe: watchlist (core / satellite / watch1)
+### Default universe: the entire watchlist table
 
-Unless the user names explicit tickers, the screening universe is **every
-symbol in the Supabase `watchlist` table whose `category` is `core`,
-`satellite`, or `watch1`** (112 symbols as of 2026-10-08: core 19 /
-satellite 46 / watch1 47 — refresh each run, membership changes).
+Unless the user names explicit tickers, this pipeline's screening universe
+is **every symbol in the Supabase `watchlist` table — all categories, no
+filter** (core, satellite, watch1, watch2+, hedges — everything). The
+sister pipeline `jlaw-v2-chart` covers only the core/satellite/watch1
+subset visually; this pipeline is the quantitative sweep of the full list.
 
 Fetch symbols from Supabase (project `vmxxmdtzvwizrpjrrvnp`), e.g.:
 
 ```sql
-select symbol from watchlist where category in ('core','satellite','watch1');
+select symbol from watchlist;
 ```
 
-Save the comma-separated list (e.g. `watchlist_csw.txt`) and pass it to the
+Save the comma-separated list (e.g. `watchlist_all.txt`) and pass it to the
 runner:
 
 ```bash
 python3 repo/skills/jlaw-yahoo-runner/scripts/jlaw_yahoo_runner.py \
-  --symbols "$(cat watchlist_csw.txt)" --output out/jlaw_$(date -u +%F).json
+  --symbols "$(cat watchlist_all.txt)" --output out/jlaw_$(date -u +%F).json
 ```
 
-Excluded by design: other categories (e.g. watch2+, index/ETF hedges) and
-symbols the runner cannot score (insufficient history) — report those as
+Symbols the runner cannot score (insufficient history) are reported as
 skipped, never silently dropped.
 
 ### Daily routine (mirrors 每天交易部署流程)
@@ -156,12 +156,14 @@ Table schema (already created by migration `create_trade_jlaw_v2`):
 - Missing holdings file → skip the holdings stage with an explicit note.
 - Regime unknown → treat as `Neutral` and say so.
 
-## Handoff: visual confirmation (jlaw-v2-chart)
+## Sister pipeline: visual review (jlaw-v2-chart)
 
-After `screen`, hand the survivors (score ≥ 10 / Watch / Valid rows) to the
-**`jlaw-v2-chart`** skill for visual review on the user's TradingView "Kimi"
-layout. The chart layer can downgrade a verdict, never upgrade it. A run is
-complete only when the survivors have been chart-reviewed or the user has
-waived the visual step.
+This pipeline and **`jlaw-v2-chart`** run **independently and in parallel**:
+this skill sweeps the entire `watchlist` quantitatively; `jlaw-v2-chart`
+visually reviews the `core` / `satellite` / `watch1` subset on TradingView.
+Both upsert to `trade-jlaw-v2` under `unique (run_date, symbol,
+jlaw_review_type)` — rows are told apart by `jlaw_review_type`
+(`yahoo` vs `chart`) and never overwrite each other. Where both cover the
+same symbol, a failing chart overrides a flattering score.
 
 *This is research and analysis only, not personalized financial advice.*

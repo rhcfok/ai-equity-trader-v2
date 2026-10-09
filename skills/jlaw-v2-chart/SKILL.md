@@ -1,33 +1,37 @@
 ---
 name: jlaw-v2-chart
-description: Visual chart review of J Law trading candidates on the user's live TradingView "Kimi" layout. Use when asked to review/verify tickers on TradingView, eyeball charts for J Law setups, confirm screener survivors visually, or capture chart screenshots for the J Law workflow. This is the qualitative confirmation layer that complements the quantitative jlaw-v2-yahoo skill.
+description: Visual chart review of J Law watchlist tickers on the user's live TradingView "Kimi" layout. Use when asked to review/verify tickers on TradingView, eyeball charts for J Law setups, run the chart pipeline over the watchlist core/satellite/watch1 categories, or capture chart screenshots for the J Law workflow. This is the visual pipeline that runs in parallel with the quantitative jlaw-v2-yahoo skill.
 icon: candlestick-chart
 color: Blue
 ---
 
 # J Law Chart Review (TradingView visual layer)
 
-This skill is the **eyeball layer** of the J Law workflow. `jlaw-v2-yahoo`
-screens and gates a whole universe from Yahoo OHLCV data; this skill then
-visually confirms the handful of survivors on the user's live TradingView
-charts — base quality, MA geometry, 200MA slope, live pivot behaviour,
-earnings flags — the things numbers do not capture well.
+This skill is the **visual pipeline** of the J Law workflow. It runs in
+parallel with `jlaw-v2-yahoo`: the yahoo pipeline screens the **entire**
+Supabase `watchlist` table from OHLCV data; this skill reviews **every
+ticker in `category` ∈ {core, satellite, watch1}** on the user's live
+TradingView charts — base quality, MA geometry, 200MA slope, live pivot
+behaviour, earnings flags — the things numbers do not capture well.
 
-Keep the two skills separate: never run visual review on the whole universe;
-only chart the checklist survivors (typically score ≥ 10, or the Watch/Valid
-rows). A high runner score can never override a failing chart (trend/stage
-items are absolute).
+Both pipelines upsert to the same `trade-jlaw-v2` table, distinguished by
+`jlaw_review_type` (`chart` here, `yahoo` there). Where both cover the same
+symbol, a failing chart always overrides a flattering score — trend/stage
+items are absolute.
 
 > Research and analysis only. No orders, no brokerage connection, no
 > personalized financial advice.
 
 ## Boundaries
 
-- Review only candidates handed over from `jlaw-v2-yahoo` (or explicitly
-  named tickers); do not re-screen the universe visually.
-- Chart findings **downgrade** but never upgrade a doctrine verdict:
-  a Valid row with a broken chart becomes Watch/Skip; a Skip row never
-  becomes Valid because the chart "looks nice".
+- This is an **independent pipeline**, not a sub-step of `jlaw-v2-yahoo`:
+  it reviews **every ticker in the Supabase `watchlist` table whose
+  `category` is `core`, `satellite`, or `watch1`** (112 symbols as of
+  2026-10-08), fetched fresh each run. It does not wait for, or depend on,
+  the yahoo pipeline's output.
+- Chart verdicts stand on their own as the visual review of record; when a
+  yahoo row for the same symbol/date exists, chart findings may **downgrade**
+  the combined view but never upgrade it.
 - Never place orders or set positions — verdicts are research output.
 - Do not set TradingView alerts unless the user explicitly asks.
 
@@ -66,21 +70,29 @@ unavailable or the user asks for the browser.
 
 ## Operating Workflow
 
-0. **Pipeline context.** The full J Law workflow runs over the **Supabase
-   `watchlist` universe — categories `core`, `satellite`, `watch1`** (see
-   `jlaw-v2-yahoo` → "Default universe"): fetch symbols → screen with
-   `jlaw-yahoo-runner` → gate with `jlaw-v2-yahoo` → chart-review survivors
-   with this skill. This skill is the last stage; it never re-screens.
-1. **Take the handoff.** Read the latest
-   `jlaw_checklist_*.json` from `jlaw-v2-yahoo` (or use the tickers the user
-   named). Select score ≥ 10 / Watch / Valid rows.
-2. **Capture** (Route A desktop app, or Route B browser):
+0. **Pipeline context.** Two pipelines run in parallel over the Supabase
+   `watchlist` table: `jlaw-v2-yahoo` screens the **entire** table from
+   Yahoo data; **this skill** visually reviews the **`core` / `satellite` /
+   `watch1` subset** on TradingView. Both upsert to `trade-jlaw-v2`, told
+   apart by `jlaw_review_type` (`yahoo` vs `chart`).
+1. **Fetch the universe.** Pull the review list straight from Supabase
+   (project `vmxxmdtzvwizrpjrrvnp`):
+
+```sql
+select symbol, exchange from watchlist
+where category in ('core','satellite','watch1');
+```
+
+   (`tv_capture.py --from-watchlist` does this automatically from
+   `SUPABASE_URL` / `SUPABASE_KEY`.)
+2. **Capture** every ticker in that universe (Route A desktop app, or Route
+   B browser):
 
 ```bash
-# Route B only:
-python <skill_dir>/scripts/tv_capture.py \
-  --from-checklist <checklist.json> --min-score 10 --out tv_review_<date>
-# or explicit:  --symbols XOM:NYSE,V:NYSE,AAPL:NASDAQ --out tv_review_<date>
+# Route B, full universe from Supabase:
+python <skill_dir>/scripts/tv_capture.py --from-watchlist --out tv_review_<date>
+# or a checklist/subset:  --from-checklist <checklist.json> --min-score 10
+# or explicit:            --symbols XOM:NYSE,V:NYSE,AAPL:NASDAQ
 ```
 
    Route B details: WebBridge daemon `http://127.0.0.1:10086/command`,
@@ -94,9 +106,10 @@ python <skill_dir>/scripts/tv_capture.py \
    slope, MA stack, extension) → base quality (VCP, tightness, volume
    dry-up, distance to pivot) → momentum (ADX / MACD / RSI) → risk geometry
    (chart-validated stop; RRR recompute if stop tightened).
-4. **Merge with the doctrine row.** Produce per ticker: STRUCTURE, TRIGGER
-   (buy-stop), STOP (chart-validated), ACTION, one-line reason. Downgrade
-   where the chart fails; never upgrade.
+4. **Verdict per ticker.** Produce: STRUCTURE, TRIGGER (buy-stop), STOP
+   (chart-validated), ACTION, one-line reason. If a same-day `yahoo` row
+   exists for the symbol, note agreement/conflict — the chart may downgrade
+   the combined view, never upgrade it.
 5. **Report** in J Law style: regime line, verdict table (ticker, score,
    live price, MA structure, ADX, pivot/stop/target, action), the actionable
    setups first, then skips with reasons. Save the report to the workspace
