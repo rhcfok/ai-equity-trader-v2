@@ -1,0 +1,125 @@
+# -*- coding: utf-8 -*-
+"""Upsert J Law chart-review results into Supabase trade-jlaw-v2.
+
+Every reviewed symbol is recorded (including Skips) with
+jlaw_review_type="chart", so chart rows coexist with the quantitative
+"yahoo" rows for the same run_date + symbol.
+
+Usage:
+    python chart_upsert.py --input chart_review_2026-10-09.json
+    python chart_upsert.py --input reviews.json --run-date 2026-10-09
+
+Input JSON: either a list of review objects, or
+{"run_date": "YYYY-MM-DD", "regime": "Risk-On", "reviews": [...]}.
+Each review object follows the jlaw-v2-chart output contract:
+    {symbol, live_price, day_change_pct, structure, ma_notes, adx,
+     macd_note, rsi, pivot, chart_stop, stop_pct, rrr_note,
+     earnings_flag, action, reason, failed_items?}
+
+Env: SUPABASE_URL, SUPABASE_KEY, SUPABASE_V2_TABLE (default trade-jlaw-v2).
+Stdlib only.
+"""
+import argparse, json, os, sys, urllib.request, urllib.error
+
+REVIEW_TYPE = "chart"
+
+
+def load_doc(path):
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    if isinstance(d, list):
+        return {"run_date": None, "regime": None, "reviews": d}
+    return d
+
+
+def to_row(r, run_date, regime):
+    action = (r.get("action") or "").strip()
+    # table `classification` mirrors the chart action label
+    classification = {
+        "valid candidate": "Valid",
+        "valid": "Valid",
+        "watch": "Watch",
+        "skip": "Skip",
+        "unreviewed": "Unreviewed",
+    }.get(action.lower(), action or None)
+    return {
+        "run_date": run_date,
+        "jlaw_review_type": REVIEW_TYPE,
+        "regime": regime,
+        "symbol": r.get("symbol"),
+        "classification": classification,
+        "current_price": r.get("live_price"),
+        "entry_price": r.get("pivot"),
+        "stop_loss": r.get("chart_stop"),
+        "stop_pct": r.get("stop_pct"),
+        "gates": {
+            "structure": r.get("structure"),
+            "ma_notes": r.get("ma_notes"),
+            "adx": r.get("adx"),
+            "macd_note": r.get("macd_note"),
+            "rsi": r.get("rsi"),
+            "day_change_pct": r.get("day_change_pct"),
+            "rrr_note": r.get("rrr_note"),
+            "earnings_flag": r.get("earnings_flag"),
+            "reason": r.get("reason"),
+        },
+        "failed_gates": r.get("failed_items") or [],
+        "unknown_gates": [],
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input", required=True)
+    ap.add_argument("--run-date", help="override run_date (YYYY-MM-DD)")
+    args = ap.parse_args()
+
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_KEY", "")
+    table = os.environ.get("SUPABASE_V2_TABLE", "trade-jlaw-v2")
+    if not url or not key:
+        print(json.dumps({"ok": False,
+                          "error": "SUPABASE_URL / SUPABASE_KEY not set"}))
+        sys.exit(2)
+    if not url.endswith("/rest/v1"):
+        url += "/rest/v1"
+
+    doc = load_doc(args.input)
+    run_date = args.run_date or doc.get("run_date")
+    regime = doc.get("regime")
+    if not run_date:
+        print(json.dumps({"ok": False, "error": "run_date missing"}))
+        sys.exit(2)
+
+    rows = [to_row(r, run_date, regime) for r in doc.get("reviews", [])]
+    rows = [r for r in rows if r["symbol"]]
+    if not rows:
+        print(json.dumps({"ok": True, "upserted": 0}))
+        return
+
+    req = urllib.request.Request(
+        f"{url}/{table}?on_conflict=run_date,symbol,jlaw_review_type",
+        data=json.dumps(rows).encode("utf-8"),
+        method="POST",
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+        print(json.dumps({"ok": True, "upserted": len(rows),
+                          "review_type": REVIEW_TYPE, "run_date": run_date}))
+    except urllib.error.HTTPError as e:
+        print(json.dumps({"ok": False, "error": f"supabase HTTP {e.code}",
+                          "detail": e.read().decode("utf-8", "ignore")[:500]}))
+        sys.exit(2)
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"supabase upsert failed: {e}"}))
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
