@@ -23,7 +23,7 @@ quant2 backtest (Yahoo v8 OHLCV fetch + walk-forward + holdout gates)
   -> make_leaderboard (leaderboard_all.csv + mae_strike_bridge.csv)
   -> upsert Supabase (quant2_runs / quant2_rule_scorecard /
                       quant2_leaderboard / quant2_mae_strike_bridge)
-  -> Notion child page "quant2 Leaderboard — <as_of>" under ai-trader-v2-kimi/quant2
+  -> Notion child page "quant2 Leaderboard — <publish_date>" under ai-trader-v2-kimi/quant2
   -> Kimi Work widget refresh (code automation -> binding -> Canvas widget)
 ```
 
@@ -69,10 +69,13 @@ Supabase into the Canvas widget as a fallback.
 - **Supabase** tables are keyed by `run_name` (= run directory name,
   `run_YYYYMMDD`); re-running the same day merges, never duplicates.
 - **Notion** parent page `ai-trader-v2-kimi/quant2` holds one child page per
-  trading day titled `quant2 Leaderboard — <as_of>` (icon 📈), each with a
-  summary line, day notes, a Top-25 table, and a group-summary table —
-  same pattern as the sibling `jlaw & option breakout` page. Skip creation
-  if a page for that as-of date already exists.
+  pipeline run day titled `quant2 Leaderboard — <publish_date>` (icon 📈),
+  where `<publish_date>` is the local date the pipeline runs (YYYY-MM-DD),
+  NOT the data as-of date; the as-of date stays in the body's summary line.
+  Each page has a summary line, day notes, a Top-25 table, and a
+  group-summary table — same pattern as the sibling
+  `jlaw & option breakout` page. Skip creation if a page for that publish
+  date already exists.
 - **Widget** shows rank/ticker/group/score bar/RSI/active-rule chips plus
   group cards; oversold rows highlighted. The score is always labelled a
   historical frequency, never a calibrated probability.
