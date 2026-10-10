@@ -65,7 +65,7 @@ UW 逐只查询成本不可忽略（49 个候选全查 ≈ 49 次调用 + 判读
 
 ## 输出
 
-写 `flow_verdicts_<date>.json` 到工作区：
+写 `flow_verdicts_<date>.json` 到工作区，**并 upsert 到 Supabase 交接表 `"flow-verdicts"`**（下游 agent A 从这里签收，不读本机文件）：
 
 ```json
 {
@@ -90,6 +90,16 @@ UW 逐只查询成本不可忽略（49 个候选全查 ≈ 49 次调用 + 判读
 ```
 
 `unrated` 记录当日未做 flow 确认的候选（含 chart/yahoo 分数），供下游排除与次日滚动补查。
+
+### 交接协议（agent B 侧写入规则）
+
+表 `"flow-verdicts"`：`verdict_date` (date, PK) / `payload` (jsonb，整个 JSON) / `status` ('partial'|'complete') / `candidates_total` / `rated_count` / `producer` / `updated_at`（自动刷新）。
+
+1. **开跑即登记**：upsert 一行 `status='partial'`、`candidates_total`=当日候选总数——让 A 知道"在跑了"
+2. **分批更新**：每查完一批标的就 upsert 更新 `payload` 和 `rated_count`（PK 是 verdict_date，重复写自动合并）
+3. **完跑置位**：全部查完后 `status='complete'`，`rated_count` 定稿
+4. **P0 兜底**：`rated_count` 必须 ≥ P0 数量（双管线交集 + chart Valid），否则不许置 complete
+5. REST upsert：POST `/flow-verdicts`，header 加 `Prefer: resolution=merge-duplicates`
 
 ## 已知坑
 

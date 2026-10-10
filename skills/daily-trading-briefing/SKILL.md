@@ -10,8 +10,19 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 ## 输入与上游依赖
 
 - Supabase `trade-jlaw-v2`：当日 `yahoo` 行 + 最新 `chart` 行（chart 常滞后一天，属正常；10-10 起已修复 null/错位问题）。
-- **flow verdict**：来自 `UW-option-breakout` skill 产出的 `flow_verdicts_<date>.json`。若不存在，先运行该 skill。
+- **flow verdict**：从 Supabase 交接表 `"flow-verdicts"` 读取（由 agent B / UW-option-breakout 写入）。本机工作区的 `flow_verdicts_<date>.json` 只是本地缓存，不是权威来源。
 - 自行拉数可用 `UW-option-breakout/scripts/pull_jlaw.py`。
+
+### Step 0 — 签收 flow verdict（agent A 侧校验规则）
+
+读 `"flow-verdicts"` 表当日行，按顺序校验：
+
+1. **存在性**：`verdict_date` = 最近交易日的行存在
+2. **完整性**：`status = 'complete'`；若为 `partial`，每 5 分钟重查一次，最多 3 次
+3. **新鲜度**：`updated_at` 在 24 小时内
+4. **覆盖率**：`rated_count` ≥ P0 数量（双管线交集 + chart Valid 数）；不达标视为 partial
+5. **schema**：`payload` 含 `verdicts` / `unrated` / `market_tide` 三个键
+6. **降级路径**：超时仍未 complete → 按 `unrated` 口径跑简报（A/B 级只含已有 verdict 的标的），简报头部注明"flow 数据不全，结论偏保守"
 
 ## 工作流
 
@@ -25,7 +36,7 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 
 ### Step 2 — 叠加 flow verdict
 
-读取 `flow_verdicts_<date>.json`，对每个候选映射：
+读取签收后 `payload` 中的 `verdicts`，对每个候选映射：
 
 - `bullish` → 通过第三重确认
 - `bearish` → **直接列入回避**，无论 chart 分数（FORM 案例）
