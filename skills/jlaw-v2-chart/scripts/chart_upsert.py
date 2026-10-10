@@ -22,6 +22,12 @@ sign convention the reviewer used. chart_score (0–16, visual A/B/C/D
 rubric) is stored in the table's `jlaw_score` column so both pipelines are
 comparable in one column; distinguish them by jlaw_review_type.
 
+Validation guards (bad values are nulled, flagged in failed_gates and
+reported as validation_warnings, never silently written):
+- pivot must be within [0.5x, 2x] of live_price (catches
+  misplaced-percentage pivots like 10.4 meaning "10.4% below")
+- chart_stop must not exceed 1.5x live_price
+
 Env: SUPABASE_URL, SUPABASE_KEY, SUPABASE_V2_TABLE (default trade-jlaw-v2).
 Stdlib only.
 """
@@ -58,6 +64,20 @@ def to_row(r, run_date, regime):
     stop_pct = _num(r.get("stop_pct"))
     if stop_pct is not None:
         stop_pct = round(abs(stop_pct), 2)  # normalize to positive distance %
+
+    warnings = []
+    live, pivot = _num(r.get("live_price")), _num(r.get("pivot"))
+    # Guard: pivot must be a plausible price vs live_price (catches the
+    # misplaced-percentage bug, e.g. pivot=10.4 meaning "10.4% below").
+    if live and pivot and not (0.5 <= pivot / live <= 2.0):
+        warnings.append(f"suspect_pivot:{pivot} vs live {live} — nulled")
+        pivot = None
+    stop = _num(r.get("chart_stop"))
+    if live and stop and stop > live * 1.5:
+        warnings.append(f"suspect_stop:{stop} above live {live} — nulled")
+        stop = None
+
+    failed = list(r.get("failed_items") or []) + [w.split(":")[0] for w in warnings]
     return {
         "run_date": run_date,
         "jlaw_review_type": REVIEW_TYPE,
@@ -66,8 +86,8 @@ def to_row(r, run_date, regime):
         "classification": classification,
         "jlaw_score": r.get("chart_score"),
         "current_price": r.get("live_price"),
-        "entry_price": r.get("pivot"),
-        "stop_loss": r.get("chart_stop"),
+        "entry_price": pivot,
+        "stop_loss": stop,
         "target_price": r.get("target_price"),
         "rrr": r.get("rrr"),
         "stop_pct": stop_pct,
@@ -83,8 +103,9 @@ def to_row(r, run_date, regime):
             "chart_score_breakdown": r.get("chart_score_breakdown"),
             "earnings_flag": r.get("earnings_flag"),
             "reason": r.get("reason"),
+            "validation_warnings": warnings or None,
         },
-        "failed_gates": r.get("failed_items") or [],
+        "failed_gates": failed,
         "unknown_gates": [],
     }
 
@@ -114,6 +135,10 @@ def main():
 
     rows = [to_row(r, run_date, regime) for r in doc.get("reviews", [])]
     rows = [r for r in rows if r["symbol"]]
+    warned = [(r["symbol"], r["gates"]["validation_warnings"])
+              for r in rows if r["gates"].get("validation_warnings")]
+    if warned:
+        print(json.dumps({"validation_warnings": warned}, ensure_ascii=False))
     if not rows:
         print(json.dumps({"ok": True, "upserted": 0}))
         return

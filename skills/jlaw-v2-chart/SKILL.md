@@ -186,5 +186,9 @@ pivot, `stop_loss` ← chart_stop, `target_price`/`rrr`/`vcp_stage` direct,
 - Screenshot unreadable (popup, wrong symbol, layout changed) → re-navigate
   and re-capture; if still unreadable, mark that ticker `unreviewed`.
 - Layout missing a required indicator → pause and ask the user.
+- `chart_upsert.py` validates before writing: a `pivot` outside
+  [0.5×, 2×] of `live_price` (misplaced percentages) or a `chart_stop`
+  above 1.5× `live_price` is nulled, flagged in `failed_gates`, and
+  reported as a `validation_warning` — never written silently.
 
 *This is research and analysis only, not personalized financial advice.*
