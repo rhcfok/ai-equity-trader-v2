@@ -31,6 +31,18 @@ python scripts/pull_jlaw.py --out .
 
 对每个候选调用 `get_flow_alerts(ticker_symbol=<symbol>, newer_than=<5 个自然日前>, limit=20)`。
 
+### Step 2.5 — 候选优先级与每日配额（覆盖策略）
+
+UW 逐只查询成本不可忽略（49 个候选全查 ≈ 49 次调用 + 判读），必须按优先级覆盖。**每日目标 ≈ 20 次查询，覆盖 90%+ 有效候选**：
+
+1. **双管线交集必查（P0，无条件）**：chart 与 yahoo 同一天都达标的标的（如 COP/MA/QQQ 型）——交集是最强信号，数量通常 ≤5，成本极低
+2. **chart Valid 必查（P0）**：全部 Valid，无论分数
+3. **Top N 配额（P1）**：剩余候选按分数降序（chart 分优先，并列时 yahoo 分高者优先）补足到每日总额约 20 只
+4. **滚动补查（P2）**：昨日未覆盖且今日仍达标的标的优先于新入选的同分标的；连续两日 ≥12 分的标的值得一次 flow 确认
+5. **unrated 处理**：未覆盖候选在输出 JSON 里列入 `unrated` 数组（含来源与分数），下游 daily-trading-briefing 将其排除在 A/B 级之外——这是保守特性，不是缺陷
+
+双 agent 并行时按管线分摊（一台查 chart 候选、一台查 yahoo 候选），各自产出 flow verdict 后合并 JSON。
+
 ### Step 3 — 判读规则（每条流按下表归类）
 
 | verdict | 判据 | 参考案例 |
@@ -70,9 +82,14 @@ python scripts/pull_jlaw.py --out .
       "next_earnings_date": "2026-12-07",
       "earnings_block": false
     }
+  ],
+  "unrated": [
+    {"symbol": "COP", "chart_score": 12, "yahoo_score": 10, "reason": "quota_exhausted"}
   ]
 }
 ```
+
+`unrated` 记录当日未做 flow 确认的候选（含 chart/yahoo 分数），供下游排除与次日滚动补查。
 
 ## 已知坑
 
