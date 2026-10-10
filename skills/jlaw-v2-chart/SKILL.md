@@ -50,7 +50,7 @@ on all of them.
   `trade-jlaw-v2` with `jlaw_review_type="chart"` — every reviewed symbol,
   Skips included (stdlib only).
 - `references/chart-review-checklist.md`: the ordered visual reading
-  checklist and verdict inputs.
+  checklist, the 0–16 chart-score rubric, and verdict inputs.
 
 ## Capture routes: desktop app (preferred) or browser
 
@@ -107,9 +107,11 @@ python <skill_dir>/scripts/tv_capture.py --from-watchlist --out tv_review_<date>
    dry-up, distance to pivot) → momentum (ADX / MACD / RSI) → risk geometry
    (chart-validated stop; RRR recompute if stop tightened).
 4. **Verdict per ticker.** Produce: STRUCTURE, TRIGGER (buy-stop), STOP
-   (chart-validated), ACTION, one-line reason. If a same-day `yahoo` row
-   exists for the symbol, note agreement/conflict — the chart may downgrade
-   the combined view, never upgrade it.
+   (chart-validated), TARGET, numeric RRR, CHART_SCORE (0–16 rubric in
+   `references/chart-review-checklist.md` §5), ACTION, one-line reason.
+   If a same-day `yahoo` row exists for the symbol, note
+   agreement/conflict — the chart may downgrade the combined view, never
+   upgrade it.
 5. **Report** in J Law style: regime line, verdict table (ticker, score,
    live price, MA structure, ADX, pivot/stop/target, action), the actionable
    setups first, then skips with reasons. Save the report to the workspace
@@ -148,16 +150,33 @@ python <skill_dir>/scripts/chart_upsert.py --input chart_review_<date>.json
 Run file `chart_review_<date>.json`:
 `{run_date, regime, reviews: [<review object>, ...]}`.
 
-Per-ticker review object: `{symbol, live_price, day_change_pct, structure,
-ma_notes, adx, macd_note, rsi, pivot, chart_stop, stop_pct, rrr_note,
-earnings_flag, action, reason, failed_items?}` with
-`action ∈ {Valid candidate, Watch, Skip, unreviewed}` and `failed_items`
-listing the checklist items that failed (e.g. `["below_falling_200ma"]`).
+Per-ticker review object:
+`{symbol, live_price, day_change_pct, structure, ma_notes, adx, macd_note,
+rsi, pivot, chart_stop, stop_pct, target_price, rrr, vcp_stage,
+chart_score, chart_score_breakdown, earnings_flag, action, reason,
+failed_items?}`
+
+- `action ∈ {Valid candidate, Watch, Skip, unreviewed}`; `failed_items`
+  lists failed checklist items (e.g. `["below_falling_200ma"]`).
+- `chart_score` is the **visual 0–16 A/B/C/D rubric** (see
+  `references/chart-review-checklist.md` §5) — same scale and bands as the
+  runner's score (0–9 Skip · 10–12 Watch · 13–14 Valid · 15–16 A+), so both
+  pipelines are comparable in the table's `jlaw_score` column. It is
+  **nullable by design** only when a chart was unreadable (`unreviewed`).
+- `target_price` (measured move / next supply), `rrr` (numeric, from chart
+  stop and target) and `vcp_stage` are numeric/text fields — record them
+  whenever the chart supports them; leave null only when genuinely
+  indeterminate (e.g. repair-stage charts with no base).
+- `stop_pct` may be written in either sign convention in the review file;
+  `chart_upsert.py` normalizes it to a **positive distance %**.
+
 **Every symbol reviewed in the run appears exactly once** — Valid, Watch,
 Skip and unreviewed alike. The same JSON feeds `scripts/chart_upsert.py`,
 which maps it into `trade-jlaw-v2` (`classification` ← action,
-`current_price` ← live_price, `entry_price` ← pivot, `stop_loss` ←
-chart_stop, `gates` ← the remaining notes) with `jlaw_review_type="chart"`.
+`jlaw_score` ← chart_score, `current_price` ← live_price, `entry_price` ←
+pivot, `stop_loss` ← chart_stop, `target_price`/`rrr`/`vcp_stage` direct,
+`gates` ← the remaining notes + score breakdown) with
+`jlaw_review_type="chart"`.
 
 ## Failure Handling
 

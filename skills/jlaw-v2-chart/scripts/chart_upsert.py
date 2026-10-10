@@ -13,8 +13,14 @@ Input JSON: either a list of review objects, or
 {"run_date": "YYYY-MM-DD", "regime": "Risk-On", "reviews": [...]}.
 Each review object follows the jlaw-v2-chart output contract:
     {symbol, live_price, day_change_pct, structure, ma_notes, adx,
-     macd_note, rsi, pivot, chart_stop, stop_pct, rrr_note,
-     earnings_flag, action, reason, failed_items?}
+     macd_note, rsi, pivot, chart_stop, stop_pct, target_price, rrr,
+     vcp_stage, chart_score, chart_score_breakdown, earnings_flag,
+     action, reason, failed_items?}
+
+stop_pct is normalized to a **positive distance in %** regardless of the
+sign convention the reviewer used. chart_score (0–16, visual A/B/C/D
+rubric) is stored in the table's `jlaw_score` column so both pipelines are
+comparable in one column; distinguish them by jlaw_review_type.
 
 Env: SUPABASE_URL, SUPABASE_KEY, SUPABASE_V2_TABLE (default trade-jlaw-v2).
 Stdlib only.
@@ -32,6 +38,13 @@ def load_doc(path):
     return d
 
 
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
 def to_row(r, run_date, regime):
     action = (r.get("action") or "").strip()
     # table `classification` mirrors the chart action label
@@ -42,16 +55,23 @@ def to_row(r, run_date, regime):
         "skip": "Skip",
         "unreviewed": "Unreviewed",
     }.get(action.lower(), action or None)
+    stop_pct = _num(r.get("stop_pct"))
+    if stop_pct is not None:
+        stop_pct = round(abs(stop_pct), 2)  # normalize to positive distance %
     return {
         "run_date": run_date,
         "jlaw_review_type": REVIEW_TYPE,
         "regime": regime,
         "symbol": r.get("symbol"),
         "classification": classification,
+        "jlaw_score": r.get("chart_score"),
         "current_price": r.get("live_price"),
         "entry_price": r.get("pivot"),
         "stop_loss": r.get("chart_stop"),
-        "stop_pct": r.get("stop_pct"),
+        "target_price": r.get("target_price"),
+        "rrr": r.get("rrr"),
+        "stop_pct": stop_pct,
+        "vcp_stage": r.get("vcp_stage"),
         "gates": {
             "structure": r.get("structure"),
             "ma_notes": r.get("ma_notes"),
@@ -60,6 +80,7 @@ def to_row(r, run_date, regime):
             "rsi": r.get("rsi"),
             "day_change_pct": r.get("day_change_pct"),
             "rrr_note": r.get("rrr_note"),
+            "chart_score_breakdown": r.get("chart_score_breakdown"),
             "earnings_flag": r.get("earnings_flag"),
             "reason": r.get("reason"),
         },
