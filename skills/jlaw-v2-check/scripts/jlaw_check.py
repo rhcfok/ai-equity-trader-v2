@@ -23,6 +23,11 @@ import argparse, json, os, sys, urllib.request, urllib.error, urllib.parse
 VALID_TYPES = {"yahoo", "chart"}
 LEGACY_TYPES = {"data": "yahoo"}  # mislabel seen 2026-10-09/10, normalize to yahoo
 CHART_CATEGORIES = ("core", "satellite", "watch1")
+# Watchlist symbols Yahoo Finance does not cover (non-US listings /
+# data limitations) — confirmed by owner 2026-10-10, excluded from the
+# yahoo coverage expectation instead of flagged on every run.
+KNOWN_YAHOO_EXCLUSIONS = {"AIR", "AIXA", "AVB", "AVEX", "EQR", "IFX",
+                          "SATS", "SKHY", "SPCX"}
 BANDS = [(15, 16, "A+"), (13, 14, "Valid"), (10, 12, "Watch"), (0, 9, "Skip")]
 
 
@@ -129,12 +134,14 @@ def audit(supa, table, wl_table, date, normalize):
 
     wl = supa.get(wl_table, {"select": "symbol,category"})
     wl_all = {w["symbol"] for w in wl if w.get("symbol")}
+    excluded = sorted(wl_all & KNOWN_YAHOO_EXCLUSIONS)
     wl_chart = {w["symbol"] for w in wl
                 if w.get("category") in CHART_CATEGORIES}
 
     # ---- coverage ---------------------------------------------------------
     coverage = {}
-    for t, expected in (("yahoo", wl_all), ("chart", wl_chart)):
+    for t, expected in (("yahoo", wl_all - KNOWN_YAHOO_EXCLUSIONS),
+                        ("chart", wl_chart)):
         got = {r["symbol"] for r in by_type.get(t, []) if r.get("symbol")}
         missing = sorted(expected - got)
         coverage[t] = {"rows": len(by_type.get(t, [])),
@@ -251,6 +258,7 @@ def audit(supa, table, wl_table, date, normalize):
 
     ok = not any(f["severity"] == "error" for f in findings)
     return {"ok": ok, "run_date": date, "coverage": coverage,
+            "yahoo_exclusions": excluded,
             "label_counts": counts, "agreement": agreement,
             "findings": findings}
 
@@ -284,6 +292,9 @@ def main():
     else:
         print(f"jlaw-v2-check  run_date={rep['run_date']}  "
               f"{'OK' if rep['ok'] else 'DEFECTS FOUND'}")
+        if rep.get("yahoo_exclusions"):
+            print(f"  yahoo exclusions (known, ignored): "
+                  f"{', '.join(rep['yahoo_exclusions'])}")
         for t, cov in rep["coverage"].items():
             print(f"  [{t}] {cov['rows']} rows / watchlist "
                   f"{cov['expected_watchlist']} "
