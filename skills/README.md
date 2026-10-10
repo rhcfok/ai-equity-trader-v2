@@ -76,6 +76,10 @@ Run the Supabase upserts only when result publication is approved.
   38+18 rules, daily routine, glossary + gate evaluator script
 - `jlaw-v2-chart/` — visual layer: capture script, chart upsert script,
   chart-review checklist
+- `jlaw-v2-check/` — QC layer: post-run audit of `trade-jlaw-v2`
+  (coverage, labels, nulls, sanity, score-band, cross-pipeline agreement)
+  + defect playbook. Run after every pipeline run:
+  `python3 skills/jlaw-v2-check/scripts/jlaw_check.py`
 - `jlaw-yahoo-runner/` — shared OHLCV screener used by the yahoo pipeline
 
 Read each skill's `SKILL.md` first — it is the authoritative contract
