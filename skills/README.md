@@ -9,7 +9,7 @@ only — no orders, no brokerage connection, no personalized financial advice.
 | Universe | **Entire `watchlist` table** — all categories | `watchlist` where `category ∈ {core, satellite, watch1}` |
 | Engine | `jlaw-yahoo-runner` (Yahoo OHLCV) + `jlaw_checklist.py` gate evaluator | TradingView "Kimi" layout screenshots, read against the chart-review checklist |
 | Output | Score + doctrine gates → A+ / Valid / Watch / Skip | STRUCTURE / TRIGGER / STOP / ACTION per ticker |
-| Supabase | `trade-jlaw-v2` rows with `jlaw_review_type = "yahoo"` (Skips excluded) | `trade-jlaw-v2` rows with `jlaw_review_type = "chart"` (**every** reviewed symbol, Skips included) |
+| Supabase | `trade-jlaw-v2` rows with `jlaw_review_type = "yahoo"` (**every** scored symbol, Skips included) | `trade-jlaw-v2` rows with `jlaw_review_type = "chart"` (**every** reviewed symbol, Skips included) |
 
 Rows coexist under `unique (run_date, symbol, jlaw_review_type)` — same-day
 reruns replace their own type's rows and never collide across pipelines.
@@ -76,6 +76,10 @@ Run the Supabase upserts only when result publication is approved.
   38+18 rules, daily routine, glossary + gate evaluator script
 - `jlaw-v2-chart/` — visual layer: capture script, chart upsert script,
   chart-review checklist
+- `jlaw-v2-check/` — QC layer: post-run audit of `trade-jlaw-v2`
+  (coverage, labels, nulls, sanity, score-band, cross-pipeline agreement)
+  + defect playbook. Run after every pipeline run:
+  `python3 skills/jlaw-v2-check/scripts/jlaw_check.py`
 - `jlaw-yahoo-runner/` — shared OHLCV screener used by the yahoo pipeline
 
 Read each skill's `SKILL.md` first — it is the authoritative contract
