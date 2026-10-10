@@ -15,7 +15,7 @@ TradingView charts — base quality, MA geometry, 200MA slope, live pivot
 behaviour, earnings flags — the things numbers do not capture well.
 
 Both pipelines upsert to the same `trade-jlaw-v2` table, distinguished by
-`jlaw_review_type` (`chart` here, `yahoo` there). Where both cover the same
+`jlaw_review_type` (`chart` here, `data` there). Where both cover the same
 symbol, a failing chart always overrides a flattering score — trend/stage
 items are absolute.
 
@@ -30,7 +30,7 @@ items are absolute.
   2026-10-08), fetched fresh each run. It does not wait for, or depend on,
   the yahoo pipeline's output.
 - Chart verdicts stand on their own as the visual review of record; when a
-  yahoo row for the same symbol/date exists, chart findings may **downgrade**
+  data row for the same symbol/date exists, chart findings may **downgrade**
   the combined view but never upgrade it.
 - Never place orders or set positions — verdicts are research output.
 - Do not set TradingView alerts unless the user explicitly asks.
@@ -74,7 +74,7 @@ unavailable or the user asks for the browser.
    `watchlist` table: `jlaw-v2-yahoo` screens the **entire** table from
    Yahoo data; **this skill** visually reviews the **`core` / `satellite` /
    `watch1` subset** on TradingView. Both upsert to `trade-jlaw-v2`, told
-   apart by `jlaw_review_type` (`yahoo` vs `chart`).
+   apart by `jlaw_review_type` (`data` vs `chart`).
 1. **Fetch the universe.** Pull the review list straight from Supabase
    (project `vmxxmdtzvwizrpjrrvnp`):
 
@@ -109,7 +109,7 @@ python <skill_dir>/scripts/tv_capture.py --from-watchlist --out tv_review_<date>
 4. **Verdict per ticker.** Produce: STRUCTURE, TRIGGER (buy-stop), STOP
    (chart-validated), TARGET, numeric RRR, CHART_SCORE (0–16 rubric in
    `references/chart-review-checklist.md` §5), ACTION, one-line reason.
-   If a same-day `yahoo` row exists for the symbol, note
+   If a same-day `data` row exists for the symbol, note
    agreement/conflict — the chart may downgrade the combined view, never
    upgrade it.
 5. **Report** in J Law style: regime line, verdict table (ticker, score,
@@ -126,7 +126,7 @@ python <skill_dir>/scripts/chart_upsert.py --input chart_review_<date>.json
 
    Rows are written to `trade-jlaw-v2` with `jlaw_review_type = "chart"`
    under the `unique (run_date, symbol, jlaw_review_type)` constraint, so
-   chart rows coexist with the quantitative `"yahoo"` rows for the same
+   chart rows coexist with the quantitative `"data"` rows for the same
    date/symbol — the two pipelines can run in parallel and be told apart by
    `jlaw_review_type`. Env: `SUPABASE_URL`, `SUPABASE_KEY`,
    `SUPABASE_V2_TABLE` (default `trade-jlaw-v2`). Only run the upsert after

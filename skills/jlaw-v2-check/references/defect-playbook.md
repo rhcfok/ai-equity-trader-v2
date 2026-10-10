@@ -7,26 +7,30 @@ Known defect patterns observed in production runs (first audited
 All SQL targets project `vmxxmdtzvwizrpjrrvnp`, table `trade-jlaw-v2`
 (quoted — the name contains hyphens).
 
-## 1. Wrong review-type label (`data` instead of `yahoo`)
+## 1. Legacy review-type label (`yahoo` instead of `data`)
 
-**Symptom.** Rows with `jlaw_review_type = 'data'`; spot-check shows they
-are yahoo-pipeline output (score + doctrine gates populated).
+**Symptom.** Rows with `jlaw_review_type = 'yahoo'`; spot-check shows they
+are quantitative-pipeline output (score + doctrine gates populated).
 
-**Root cause.** A runner hard-coded the string `"data"` instead of the
-contract value `"yahoo"`.
+**Background.** The quantitative pipeline's label was renamed `yahoo` →
+`data` on 2026-10-09 at the owner's explicit instruction. The only valid
+labels are `data` (quantitative, jlaw-v2-yahoo) and `chart` (visual,
+jlaw-v2-chart). **Never rewrite `data` rows to `yahoo`** — that was the
+pre-rename convention and doing so breaks the contract.
 
 **Repair.**
 
 ```sql
-update "trade-jlaw-v2" set jlaw_review_type = 'yahoo'
-where jlaw_review_type = 'data';
+update "trade-jlaw-v2" set jlaw_review_type = 'data'
+where jlaw_review_type = 'yahoo';
 ```
 
 Or: `python scripts/jlaw_check.py --normalize-labels`.
 
-**Prevention.** `REVIEW_TYPE = "yahoo"` constant in the runner; the skill
-contract states the only valid labels are `yahoo` / `chart`. Keep the full
-record — do **not** delete rows to fix labels.
+**Prevention.** `JLAW_REVIEW_TYPE` defaults to `data` in
+`jlaw_checklist.py`; the skill contract states the only valid labels are
+`data` / `chart`. Keep the full record — do **not** delete rows to fix
+labels.
 
 ## 2. Null cells on chart rows (jlaw_score, entry_price, …)
 

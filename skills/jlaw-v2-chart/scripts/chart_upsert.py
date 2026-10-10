@@ -3,7 +3,7 @@
 
 Every reviewed symbol is recorded (including Skips) with
 jlaw_review_type="chart", so chart rows coexist with the quantitative
-"yahoo" rows for the same run_date + symbol.
+"data" rows for the same run_date + symbol.
 
 Usage:
     python chart_upsert.py --input chart_review_2026-10-09.json
