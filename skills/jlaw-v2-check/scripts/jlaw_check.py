@@ -3,13 +3,13 @@
 
 Audits what jlaw-v2-yahoo / jlaw-v2-chart wrote:
   1. coverage   — rows per run_date x jlaw_review_type vs watchlist
-  2. labels     — jlaw_review_type outside {data, chart}
+  2. labels     — jlaw_review_type outside {yahoo, chart}
   3. nulls      — nulls in score/prices/classification (Unreviewed exempt)
   4. sanity     — entry_price band, stop_loss band, stop_pct, rrr
   5. score-band — classification vs jlaw_score band consistency
   6. agreement  — cross-pipeline conflicts for same date+symbol
 
-Read-only unless --normalize-labels (rewrites legacy 'yahoo' labels to data).
+Read-only unless --normalize-labels (rewrites legacy 'data' labels to yahoo).
 
 Usage:
     python jlaw_check.py [--date YYYY-MM-DD] [--json] [--normalize-labels]
@@ -20,8 +20,8 @@ SUPABASE_WATCHLIST_TABLE (default watchlist). Stdlib only.
 """
 import argparse, json, os, sys, urllib.request, urllib.error, urllib.parse
 
-VALID_TYPES = {"data", "chart"}
-LEGACY_TYPES = {"yahoo": "data"}  # pre-2026-10-10 label, normalize to data
+VALID_TYPES = {"yahoo", "chart"}
+LEGACY_TYPES = {"data": "yahoo"}  # mislabel seen 2026-10-09/10, normalize to yahoo
 CHART_CATEGORIES = ("core", "satellite", "watch1")
 BANDS = [(15, 16, "A+"), (13, 14, "Valid"), (10, 12, "Watch"), (0, 9, "Skip")]
 
@@ -111,12 +111,12 @@ def audit(supa, table, wl_table, date, normalize):
         findings.append({
             "check": "labels", "severity": sev,
             "detail": f"non-standard jlaw_review_type values: {bad_labels}",
-            "likely_cause": "legacy runner wrote 'yahoo' — the quantitative "
-                            "pipeline label is 'data' since 2026-10-09",
+            "likely_cause": "runner wrote 'data' instead of the contract "
+                            "value 'yahoo' — patch the runner default",
         })
         if normalize:
             for t in bad_labels:
-                target = LEGACY_TYPES.get(t, "data")
+                target = LEGACY_TYPES.get(t, "yahoo")
                 ok = supa.patch(table, {"jlaw_review_type": f"eq.{t}"},
                                 {"jlaw_review_type": target})
                 findings[-1].setdefault("fixed", {})[t] = target if ok else "FAILED"
@@ -134,7 +134,7 @@ def audit(supa, table, wl_table, date, normalize):
 
     # ---- coverage ---------------------------------------------------------
     coverage = {}
-    for t, expected in (("data", wl_all), ("chart", wl_chart)):
+    for t, expected in (("yahoo", wl_all), ("chart", wl_chart)):
         got = {r["symbol"] for r in by_type.get(t, []) if r.get("symbol")}
         missing = sorted(expected - got)
         coverage[t] = {"rows": len(by_type.get(t, [])),
@@ -168,9 +168,8 @@ def audit(supa, table, wl_table, date, normalize):
                     "likely_cause": ("chart: review contract not filled — "
                                      "extend chart_upsert input / agent "
                                      "checklist" if t == "chart" else
-                                     "data pipeline: gate evaluator dropped "
-                                     "a field — check jlaw_checklist.py "
-                                     "output"),
+                                     "yahoo: gate evaluator dropped a field "
+                                     "— check jlaw_checklist.py output"),
                 })
 
     # ---- sanity -----------------------------------------------------------
@@ -222,12 +221,12 @@ def audit(supa, table, wl_table, date, normalize):
             })
 
     # ---- cross-pipeline agreement -----------------------------------------
-    data_map = {r["symbol"]: r for r in by_type.get("data", [])}
+    yahoo_map = {r["symbol"]: r for r in by_type.get("yahoo", [])}
     chart_map = {r["symbol"]: r for r in by_type.get("chart", [])}
     order = {"Skip": 0, "Watch": 1, "Valid": 2, "A+": 3}
     agreement = {"both": 0, "same_class": 0, "conflicts": []}
-    for sym in sorted(set(data_map) & set(chart_map)):
-        y, c = data_map[sym], chart_map[sym]
+    for sym in sorted(set(yahoo_map) & set(chart_map)):
+        y, c = yahoo_map[sym], chart_map[sym]
         yc, cc = y.get("classification"), c.get("classification")
         if not yc or not cc or cc == "Unreviewed":
             continue
@@ -236,8 +235,8 @@ def audit(supa, table, wl_table, date, normalize):
             agreement["same_class"] += 1
         elif abs(order.get(yc, 1) - order.get(cc, 1)) >= 2:
             agreement["conflicts"].append({
-                "symbol": sym, "data": yc, "chart": cc,
-                "data_score": y.get("jlaw_score"),
+                "symbol": sym, "yahoo": yc, "chart": cc,
+                "yahoo_score": y.get("jlaw_score"),
                 "chart_score": c.get("jlaw_score"),
                 "resolution": "chart overrides — treat as the stricter "
                               "verdict",
@@ -268,7 +267,7 @@ def main():
     ap.add_argument("--json", action="store_true",
                     help="print raw JSON only")
     ap.add_argument("--normalize-labels", action="store_true",
-                    help="rewrite legacy 'yahoo' jlaw_review_type to 'data'")
+                    help="rewrite legacy 'data' jlaw_review_type to 'yahoo'")
     args = ap.parse_args()
 
     supa = Supa()

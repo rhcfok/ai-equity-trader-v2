@@ -130,7 +130,7 @@ Add `--write-supabase` to `screen` only after the operator approves result
 publication. Candidates are upserted into `"trade-jlaw-v2"` with a
 `unique (run_date, symbol, jlaw_review_type)` constraint — same-date reruns
 of the same review type replace rows and never duplicate them. Rows written
-by this skill carry `jlaw_review_type = "data"` (env `JLAW_REVIEW_TYPE`
+by this skill carry `jlaw_review_type = "yahoo"` (env `JLAW_REVIEW_TYPE`
 overrides); the chart-review skill
 (`jlaw-v2-chart`) writes its own rows for the same date/symbol with
 `"chart"`, so the two pipelines can run in parallel without overwriting
@@ -143,7 +143,7 @@ Table schema (already created by migration `create_trade_jlaw_v2`):
 | Column | Type | Source |
 |---|---|---|
 | `run_date` | date | runner run date |
-| `jlaw_review_type` | text | `"data"` from this skill, `"chart"` from jlaw-v2-chart (part of the unique key) |
+| `jlaw_review_type` | text | `"yahoo"` from this skill, `"chart"` from jlaw-v2-chart (part of the unique key) |
 | `regime` | text | `JLAW_REGIME` at evaluation time |
 | `symbol`, `classification` | text | evaluator verdict |
 | `jlaw_score`, `current_price`, `entry_price`, `stop_loss`, `target_price` | numeric | runner row |
@@ -166,7 +166,7 @@ this skill sweeps the entire `watchlist` quantitatively; `jlaw-v2-chart`
 visually reviews the `core` / `satellite` / `watch1` subset on TradingView.
 Both upsert to `trade-jlaw-v2` under `unique (run_date, symbol,
 jlaw_review_type)` — rows are told apart by `jlaw_review_type`
-(`data` vs `chart`) and never overwrite each other. Where both cover the
+(`yahoo` vs `chart`) and never overwrite each other. Where both cover the
 same symbol, a failing chart overrides a flattering score.
 
 *This is research and analysis only, not personalized financial advice.*

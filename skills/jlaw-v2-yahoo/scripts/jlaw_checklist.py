@@ -146,7 +146,7 @@ def upsert_supabase(doc, rows_in):
     Uses the PostgREST upsert with the unique
     (run_date, symbol, jlaw_review_type) constraint — same-date reruns of the
     same review type replace rows, never duplicate them. Rows from this
-    script carry jlaw_review_type="data" by default (env JLAW_REVIEW_TYPE
+    script carry jlaw_review_type="yahoo" by default (env JLAW_REVIEW_TYPE
     overrides); the chart-review layer (jlaw-v2-chart) writes "chart".
     """
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -163,7 +163,7 @@ def upsert_supabase(doc, rows_in):
         g = c.get("gates") or {}
         rows.append({
             "run_date": doc.get("run_date"),
-            "jlaw_review_type": os.environ.get("JLAW_REVIEW_TYPE", "data"),
+            "jlaw_review_type": os.environ.get("JLAW_REVIEW_TYPE", "yahoo"),
             "regime": doc.get("regime"),
             "symbol": c.get("symbol"),
             "classification": c.get("classification"),

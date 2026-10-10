@@ -9,7 +9,7 @@ only — no orders, no brokerage connection, no personalized financial advice.
 | Universe | **Entire `watchlist` table** — all categories | `watchlist` where `category ∈ {core, satellite, watch1}` |
 | Engine | `jlaw-yahoo-runner` (Yahoo OHLCV) + `jlaw_checklist.py` gate evaluator | TradingView "Kimi" layout screenshots, read against the chart-review checklist |
 | Output | Score + doctrine gates → A+ / Valid / Watch / Skip | STRUCTURE / TRIGGER / STOP / ACTION per ticker |
-| Supabase | `trade-jlaw-v2` rows with `jlaw_review_type = "data"` (**every** scored symbol, Skips included) | `trade-jlaw-v2` rows with `jlaw_review_type = "chart"` (**every** reviewed symbol, Skips included) |
+| Supabase | `trade-jlaw-v2` rows with `jlaw_review_type = "yahoo"` (**every** scored symbol, Skips included) | `trade-jlaw-v2` rows with `jlaw_review_type = "chart"` (**every** reviewed symbol, Skips included) |
 
 Rows coexist under `unique (run_date, symbol, jlaw_review_type)` — same-day
 reruns replace their own type's rows and never collide across pipelines.

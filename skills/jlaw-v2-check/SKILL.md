@@ -22,13 +22,14 @@ default; the only write it can perform is label normalization
 ## What it checks
 
 1. **Coverage** — row counts per `run_date × jlaw_review_type`, compared
-   against the `watchlist` table: `data` rows should cover the **entire**
+   against the `watchlist` table: yahoo rows should cover the **entire**
    watchlist; chart rows should cover `category ∈ {core, satellite, watch1}`.
    Missing symbols are listed (capped) so a partial run is caught.
-2. **Labels** — any `jlaw_review_type` outside `{data, chart}`. `yahoo` is
-   the legacy pre-2026-10-10 label for the quantitative pipeline; with
-   `--normalize-labels`, legacy `yahoo` labels are rewritten to `data`.
-   **Never rewrite `data` to `yahoo`** — `data` is the contract value.
+2. **Labels** — any `jlaw_review_type` outside `{yahoo, chart}`. `data`
+   was a mislabel a runner used on 2026-10-09/10 (the owner confirmed
+   `yahoo` is the contract value); with `--normalize-labels`, legacy
+   `data` labels are rewritten to `yahoo`.
+   **Never rewrite `yahoo` to `data`** — `yahoo` is the contract value.
 3. **Null audit** — null counts for `jlaw_score`, `entry_price`,
    `current_price`, `stop_loss`, `classification`, split by review type.
    Chart rows with `classification = 'Unreviewed'` are exempt from the
@@ -41,7 +42,7 @@ default; the only write it can perform is label normalization
    mean the runner hand-set a classification.
 6. **Cross-pipeline agreement** — for symbols covered by both pipelines on
    the same date, compare classifications and scores; list conflicts
-   (e.g. data Valid vs chart Skip — remember: a failing chart overrides
+   (e.g. yahoo Valid vs chart Skip — remember: a failing chart overrides
    a flattering score).
 
 ## Usage
