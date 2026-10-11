@@ -234,7 +234,7 @@ def build_quant2(base, key, max_rows):
         "## Group summary",
         "",
         "| Group | Tickers | Avg score | Avg RSI14 | Oversold | Trend-aligned |",
-        "|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|",
     ]
     for name, g in g_rows:
         avg_rsi = f"{sum(g['rsi']) / len(g['rsi']):.1f}" if g["rsi"] else "—"
