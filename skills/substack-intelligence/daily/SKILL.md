@@ -56,6 +56,28 @@ market_backdrop jsonb | watchlist_flags jsonb | anticipation_status jsonb
 raw_markdown text | notion_url text | source_files text[]
 ```
 
+## TSP callout analytics overlay (event-study based — include in every daily)
+
+A 2026-10-13 event study (576 dated, price-stamped TSP callouts; `substack-intel/data/tsp_event_study.json`; scripts `scripts/tsp_events.mjs` + `scripts/tsp_stats2.mjs`) established that TSP callouts carry **two opposite short-term signals**. Every daily summary must apply this to TSP content:
+
+| TSP event type | Historical short-term behavior | How to annotate in the daily |
+|---|---|---|
+| **ACTION ALERT** (explicit dated add/remove with price/PT) | Cleanest signal: GLW +35.4% (PT exceeded), BRZE +14.3%/1wk, WDAY sold +113.6% | Flag as **high-weight** — quote entry/PT verbatim |
+| **First-time portfolio tag** (Vulture/Small-Cap) | **Post-tag drift DOWN: median −10.5%, hit 17% at 20d** (12 vulture, 8 smallcap events); recovers long-run (vulture 92% up, μ +49.8%) | Flag: *"expect post-tag drift — historically better entry 2–4 weeks after the tag"* |
+| **News-recap mention** (non-portfolio) | Momentum tell: +6.4% median 5d, 75% hit; +13.8% μ 20d | Treat as a short-term momentum screen item |
+| Split artifacts | Stated prices can be pre-split (CRWD 4:1 found) | Cross-check stated price vs file close; ratio >1.5 or <0.67 → use adjusted close |
+
+Standing stats block (reproduce in the daily's TSP section; refresh via the two scripts when new first-tag events accrue):
+
+```
+First Vulture tag (n=12):  20d μ −13.2% / hit 17%  → now μ +49.8% / hit 92%
+First Small-Cap tag (n=8): 20d μ −10.8% / hit 38%  → now μ +34.0% / hit 50%
+News mentions (n=36):      5d μ +6.4% / hit 75%    → now μ +60.5% / hit 78%
+All mentions (n=576):      20d μ +5.9% / hit 60%   → now μ +41.6% / hit 86%
+Benchmark: SPX +7.6–11.1% same spans; first-callout median excess +16.7% (64% hit)
+Caveats: single regime (2026 software/memory bull), small n per tag group, clustered weekly re-mentions
+```
+
 ## Editorial rules
 
 - **Never fabricate** — quote levels exactly as published; missing = "not stated"; paywalled = "paywalled".

@@ -14,7 +14,7 @@ Format is fixed — mirror the W1/W2 structure exactly (Notion: *Weekly Digest �
 
 ## The 9 sections (W1 structure — keep the numbering)
 
-1. **Coverage this week** — table: Letter | Posts (window) | New since last week | Notes. Window = last Tuesday→Tuesday (or last 7 days; state it).
+1. **Coverage this week** — table: Letter | Posts (window) | New since last week | Notes. **Window = previous Sunday through this Saturday inclusive** (the run happens Sunday 10:00 local; cover the 7 completed days ending yesterday).
 2. **Market backdrop** — table: Series | window-start | now | Week. Always include SPX, NDX, SOXX, NVDA, MU, 10Y (^TNX), VIX plus the week's rotation winners/losers. One prose paragraph: the tape's story in the letters' framing.
 3. **Classification** — one line, unchanged from the audit (Group A = Damnang/PhotonCap/Nutty + Irrational/FUNDA/Gaetano/mark; Group B = BTYC/MimiVJ 主刊/Trader Joe/Money Machine/AsymBets; straddlers = MimiVJ-Strategy/FOMO/Wings/April/Dick/TSP).
 4. **Author-by-author — brief** — 1–3 lines per letter covering **new posts only** (no re-summary of old material). Quote theses verbatim where load-bearing.
