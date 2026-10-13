@@ -20,7 +20,7 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 1. **存在性**：`verdict_date` = 最近交易日的行存在
 2. **完整性**：`status = 'complete'`；若为 `partial`，每 5 分钟重查一次，最多 3 次
 3. **新鲜度**：`updated_at` 在 24 小时内
-4. **覆盖率**：`rated_count` ≥ P0 数量（双管线交集 + chart Valid 数）；不达标视为 partial
+4. **覆盖率**：`rated_count` = `candidates_total`（`no-data` verdict 计入 rated）；不足视为 partial（2026-10-13 起 agent B 已全量覆盖，`quota_exhausted` 已废除，残留 `reason='uw_error'` 的 unrated 属 API 失败）
 5. **schema**：`payload` 含 `verdicts` / `unrated` / `market_tide` 三个键
 6. **降级路径**：超时仍未 complete → 按 `unrated` 口径跑简报（A/B 级只含已有 verdict 的标的），简报头部注明"flow 数据不全，结论偏保守"
 

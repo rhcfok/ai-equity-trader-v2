@@ -31,15 +31,15 @@ python scripts/pull_jlaw.py --out .
 
 对每个候选调用 `get_flow_alerts(ticker_symbol=<symbol>, newer_than=<5 个自然日前>, limit=20)`。
 
-### Step 2.5 — 候选优先级与每日配额（覆盖策略）
+### Step 2.5 — 全量覆盖策略（full coverage）
 
-UW 逐只查询成本不可忽略（49 个候选全查 ≈ 49 次调用 + 判读），必须按优先级覆盖。**每日目标 ≈ 20 次查询，覆盖 90%+ 有效候选**：
+**每日目标：候选全覆盖 —— 每个候选当天都必须产出 verdict（含 no-data），不允许因配额主动跳过。** 自 2026-10-13 起取消原「每日 ≈20 次」上限（典型候选量 ~50，即 ~50 次调用 + 判读）。仍按优先顺序执行，以便中途失败时先保高优先级：
 
-1. **双管线交集必查（P0，无条件）**：chart 与 yahoo 同一天都达标的标的（如 COP/MA/QQQ 型）——交集是最强信号，数量通常 ≤5，成本极低
-2. **chart Valid 必查（P0）**：全部 Valid，无论分数
-3. **Top N 配额（P1）**：剩余候选按分数降序（chart 分优先，并列时 yahoo 分高者优先）补足到每日总额约 20 只
-4. **滚动补查（P2）**：昨日未覆盖且今日仍达标的标的优先于新入选的同分标的；连续两日 ≥12 分的标的值得一次 flow 确认
-5. **unrated 处理**：未覆盖候选在输出 JSON 里列入 `unrated` 数组（含来源与分数），下游 daily-trading-briefing 将其排除在 A/B 级之外——这是保守特性，不是缺陷
+1. **双管线交集（P0）**：chart 与 yahoo 同一天都达标的标的（如 COP/MA/QQQ 型）——最强信号，最先查
+2. **chart Valid（P0）**：全部 Valid，无论分数
+3. **其余候选（P1）**：按分数降序（chart 分优先，并列时 yahoo 分高者优先）**全量查完，不打折**
+4. **限流防护（必做）**：逐只调用之间 sleep 2–3s；遇 429/超时/限流错误对该标的指数退避重试（最多 3 次）。重试后仍失败的标的列入 `unrated`（`reason='uw_error'`，附错误摘要），交接行保持 `status='partial'` 并继续按 5 分钟间隔重查。**`quota_exhausted` 已废除——禁止作为主动跳过的理由**
+5. **unrated 语义（仅限真实失败）**：`unrated` 数组只允许 `reason='uw_error'`（API 重试后仍失败）。流为空或样本太少应直接给 `no-data` verdict 并计入 rated，不进 unrated
 
 双 agent 并行时按管线分摊（一台查 chart 候选、一台查 yahoo 候选），各自产出 flow verdict 后合并 JSON。
 
@@ -83,13 +83,11 @@ UW 逐只查询成本不可忽略（49 个候选全查 ≈ 49 次调用 + 判读
       "earnings_block": false
     }
   ],
-  "unrated": [
-    {"symbol": "COP", "chart_score": 12, "yahoo_score": 10, "reason": "quota_exhausted"}
-  ]
+  "unrated": []
 }
 ```
 
-`unrated` 记录当日未做 flow 确认的候选（含 chart/yahoo 分数），供下游排除与次日滚动补查。
+`unrated` 仅在 API 重试后仍失败时非空（`reason='uw_error'`，附错误摘要）；正常完跑必须是空数组。
 
 ### 交接协议（agent B 侧写入规则）
 
@@ -98,11 +96,12 @@ UW 逐只查询成本不可忽略（49 个候选全查 ≈ 49 次调用 + 判读
 1. **开跑即登记**：upsert 一行 `status='partial'`、`candidates_total`=当日候选总数——让 A 知道"在跑了"
 2. **分批更新**：每查完一批标的就 upsert 更新 `payload` 和 `rated_count`（PK 是 verdict_date，重复写自动合并）
 3. **完跑置位**：全部查完后 `status='complete'`，`rated_count` 定稿
-4. **P0 兜底**：`rated_count` 必须 ≥ P0 数量（双管线交集 + chart Valid），否则不许置 complete
+4. **全覆盖兜底**：`rated_count` 必须 = `candidates_total`（`no-data` verdict 计入 rated），才可置 `complete`；若仍有 `reason='uw_error'` 的 unrated，保持 `partial` 并按 5 分钟间隔重查
 5. REST upsert：POST `/flow-verdicts`，header 加 `Prefer: resolution=merge-duplicates`
 
 ## 已知坑
 
+- UW 限流：逐只调用间保持 2–3s 间隔；429/超时按指数退避重试（最多 3 次）。**不要为省调用主动跳过候选——全覆盖是硬要求（2026-10-13 起，原 ≈20 次/日配额已废除）**。
 - OI 变化需次日确认，vol/OI 高 ≠ 新开仓，描述时保持"unconfirmed"口径。
 - 远端深度虚值 call 的 bid 侧大单通常是卖出（备兑或看顶），不要当成看多证据。
 - 非交易日 `get_market_tide` 会报错，回退到上一个交易日。
