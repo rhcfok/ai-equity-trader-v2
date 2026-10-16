@@ -81,6 +81,9 @@ Run the Supabase upserts only when result publication is approved.
   + defect playbook. Run after every pipeline run:
   `python3 skills/jlaw-v2-check/scripts/jlaw_check.py`
 - `jlaw-yahoo-runner/` — shared OHLCV screener used by the yahoo pipeline
+- `put-option-strategy/` — research-only Top-20 CSP / 10-point BPS ranking.
+  Accepts J Law Valid and Watch names, preserves all mechanical gates, and
+  ranks hard-pass structures without a score cutoff.
 
 Read each skill's `SKILL.md` first — it is the authoritative contract
 (boundaries, verdict rules, output schemas, failure handling).

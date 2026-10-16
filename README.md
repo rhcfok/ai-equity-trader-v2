@@ -16,6 +16,8 @@ This repository contains the **deterministic JLaw Yahoo OHLCV Model v2.0** skill
 | `skills/jlaw-v2-yahoo/SKILL.md` | Doctrine layer: regime gating, buy/sell checklists, and MRA loop applied to runner output and holdings. |
 | `skills/jlaw-v2-yahoo/scripts/jlaw_checklist.py` | Deterministic gate evaluator (stdlib only): classifies runner candidates A+/Valid/Watch/Skip and flags holding actions. |
 | `skills/jlaw-v2-yahoo/references/` | Distilled J Law methodology, official checklists, rules, daily routine, and glossary. |
+| `skills/put-option-strategy/SKILL.md` | Research-only Top-20 CSP / 10-point BPS workflow: Valid and Watch names, structural gates, score ranking, and hypothetical EOD tracking. |
+| `skills/put-option-strategy/scripts/` | Deterministic screen, report, research-ledger, and regression-test scripts. |
 
 No production credentials, Supabase keys, live watchlists, historical audits, or result exports are included.
 
