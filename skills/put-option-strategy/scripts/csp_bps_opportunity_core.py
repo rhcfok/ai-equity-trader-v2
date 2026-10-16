@@ -628,7 +628,10 @@ def markdown_report(audit: dict[str, Any]) -> str:
             for reason in (item.get("reasons") if isinstance(item.get("reasons"), list) else [])
         } if isinstance(evaluated, dict) else set()
         if "EARNINGS_OVERLAP" in reasons:
-            exclusions.append(f"- **{symbol}:** excluded where applicable because earnings occur on or before the contract expiry.")
+            if isinstance(evaluated, dict) and evaluated.get("eligible"):
+                exclusions.append(f"- **{symbol}:** longer-dated structures were excluded where earnings occur on or before expiry; earlier eligible expiries remain in the board.")
+            else:
+                exclusions.append(f"- **{symbol}:** all screened structures were excluded because earnings occur on or before the contract expiry.")
         elif "EARNINGS_UNCONFIRMED" in reasons:
             exclusions.append(f"- **{symbol}:** excluded where applicable because the next earnings date is unconfirmed.")
     if exclusions:
