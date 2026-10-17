@@ -109,7 +109,10 @@ The 0–100 **Ranked Confidence Score** is a deterministic ordering device, not 
 
 `public."csp-bps-opportunity"` is a research-tracking ledger, not an executed-trade ledger.
 
-- Persist each published Top-20 hard-pass row as `ELIGIBLE`, including `top20_rank` in the immutable audit payload.
+- After writing the live screen's report and audit, automatically upsert the rows in `ranked_top20`; do not pause for manual report review.
+- Log at most 20 hard-pass rows total across CSP and BPS, ordered by `confidence_score` descending, `reward_metric` descending, strategy, symbol, and expiry. Do not apply a minimum score cutoff; lower score bands remain eligible when every structural gate passes. Log all candidates if fewer than 20 pass.
+- Store each row as `ELIGIBLE` and retain its `top20_rank` in the audit payload. The logger consumes the runner's ordered `ranked_top20` array; no schema change is required.
+- Use the existing `opportunity_key` upsert and do not delete prior ledger records or alter source tables. A live run is incomplete if the write fails, even if its report artifacts were generated.
 - A screen with no structural hard-pass row logs one `NO_QUALIFIED_SETUP` record, excluded from the EOD win-rate denominator.
 - Mark same-day hypothetical exits conservatively: CSP short ask; BPS short ask less long bid.
 - For calibration, retain expiry close, short-strike/break-even moneyness, assignment proxy, and hypothetical expiry P&L. Do not label these as executed-trade outcomes.
