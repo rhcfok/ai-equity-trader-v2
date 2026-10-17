@@ -1,11 +1,11 @@
 ---
 name: substack-intelligence-weekly
-description: "Weekly digest from eight newsletters plus sector-rotation monitoring in a fixed 11-section Wn format. Use for weekly Substack digests or W-numbered summaries; writes to Supabase `substack-intelligence` and Notion."
+description: "Weekly digest from ten newsletters plus sector-rotation monitoring in a fixed 11-section Wn format. Use for weekly Substack digests or W-numbered summaries; writes to Supabase `substack-intelligence` and Notion."
 ---
 
 # Substack Intelligence — Weekly Skill
 
-Produce the weekly digest (Wn) from **FOMO · Damnang Research · Nutty · PhotonCap · MimiVsJames (主刊 + 即時策略) · FUNDA · Dick Capital · Tech-Stock Prospector**, with a concise market/sector-rotation read.
+Produce the weekly digest (Wn) from **FOMO · Damnang Research · Nutty · PhotonCap · MimiVsJames (主刊 + 即時策略) · FUNDA · Dick Capital · Tech-Stock Prospector · StreetAlpha · Kova Investment Research**, with a concise market/sector-rotation read.
 
 ## Required 11-section structure
 
@@ -40,15 +40,15 @@ Keep these section numbers and order. Write the complete digest to `raw_markdown
 
 ## Environment
 
-Same as the daily skill (see `../daily/SKILL.md`): pipeline at `D:\AI projects\AI-trading\substack-intel\`, proxy `127.0.0.1:6268`, WebBridge `127.0.0.1:10086/command` session `substack-digest` for paid access (Mimi 主刊/策略, Dick, TSP, FOMO, Damnang, PhotonCap, Nutty are paid; FUNDA is free-tier previews only — quote previews as-is), curl-only Yahoo, Supabase creds in `ai-equity-trader-v2/.env`, cookies purged after use.
+Same as the daily skill (see `../daily/SKILL.md`): pipeline at `D:\AI projects\AI-trading\substack-intel\`, proxy `127.0.0.1:6268`, WebBridge `127.0.0.1:10086/command` session `substack-digest` for paid access (Mimi 主刊/策略, Dick, TSP, FOMO, Damnang, PhotonCap, Nutty are paid; FUNDA is free-tier previews only — quote previews as-is; StreetAlpha is bilingual EN/CN with a light paywall — most posts readable; Kova is Ronald-free-tier with tiny previews — use its free Trading Reports as real-time sentiment/breadth datapoints and mark the rest paywalled), curl-only Yahoo, Supabase creds in `ai-equity-trader-v2/.env`, cookies purged after use.
 
 ## Letter registry (weekly set)
 
-mimivsjames / mimivsjames2 (Substack), dick (dickcapital.substack.com), tsp (techstockprospector.substack.com), fomo (**www.fomosoc.com** custom), damnang (**www.damnang.com** custom), nutty (nuttycld.substack.com), photoncap (**photoncap.net** custom), funda (fundaai.substack.com).
+mimivsjames / mimivsjames2 (Substack), dick (dickcapital.substack.com), tsp (techstockprospector.substack.com), fomo (**www.fomosoc.com** custom), damnang (**www.damnang.com** custom), nutty (nuttycld.substack.com), photoncap (**photoncap.net** custom), funda (fundaai.substack.com), streetalpha (streetalpha.substack.com — post files saved as `StreetAlpha__*`), kova (kovainvest.substack.com — post files saved as `KovaInvestmentResearch__*`).
 
 ## Procedure
 
-1. Scan all eight archives for posts newer than saved; download new posts.
+1. Scan all ten archives for posts newer than saved; download new posts.
 2. Fix the completed Sunday–Saturday reporting window and verify its dates before collecting weekly returns.
 3. Refresh prices for the market-backdrop series, all sector ETFs + QQQ/SPY, and every live-target ticker. Date-stamp live vs close and retain reference prices.
 4. Compute sector performance, weekly winners/losers, longer-horizon context, and the separate review-only stock queue. Check watchlist membership; do not modify it.
@@ -85,4 +85,5 @@ For a sector-rotation object, use explicit keys such as `windowStart`, `windowEn
 - Keep Section 6 brief; full author detail belongs in the 6-month audit.
 - Label the source of every underlying-stock item as newsletter-derived or sector-rotation-derived.
 - State that rotation candidates are research-review items, not orders or automatic watchlist changes.
-- Credibility ratings for context: Damnang 8, FUNDA 8, FOMO 7, Dick 7, TSP 7, MimiVJ-Strategy 6, MimiVJ 主刊 6.5, Nutty N/A (research), PhotonCap N/A (maps).
+- Credibility ratings for context: Damnang 8, FUNDA 8, FOMO 7, Dick 7, TSP 7, StreetAlpha 7 (caution/breadth calls 9 — weight its risk warnings HIGH; momentum-phase PT timing 4 — weight fresh bull PTs after vertical runs LOW), MimiVJ-Strategy 6, MimiVJ 主刊 6.5, Kova 4 (limited visibility — free posts as real-time sentiment/risk datapoint only; its 10/13 flip to 3x-short was the best-timed public action of any letter in October), Nutty N/A (research), PhotonCap N/A (maps).
+- For StreetAlpha, explicitly track its SOX-breadth series and geopolitical-arc pieces (Iran/Hormuz war-to-deal model) in Section 6 — both were validated through the October crack. For Kova, Section 6 covers only its free posts (breadth reads, position postmortems like the 10/12 LITE stop-cascade honesty piece).
