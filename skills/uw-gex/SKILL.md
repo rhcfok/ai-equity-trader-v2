@@ -42,7 +42,7 @@ The API key is sent only in `Authorization: Bearer` calls to `https://api.unusua
 3. Run:
 
 ```bash
-python3 /home/user/skills/uw-gex-workflow/scripts/uw-gex_workflow_runner.py
+python3 skills/uw-gex/scripts/uw-gex_workflow_runner.py
 ```
 
 4. Verify the final JSON object. A full run ends with `"failed_count": 0`; partial runs list failures and insert only successfully computed symbols.

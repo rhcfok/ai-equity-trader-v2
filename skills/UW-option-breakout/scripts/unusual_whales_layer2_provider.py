@@ -96,6 +96,11 @@ def analyze_unusual_whales(client: Any, ticker: str, end_date: str | None = None
     for realized volatility and a neutral unavailable-skew treatment.  A1 and
     A6 therefore remain false until a provider entitlement exposes historical
     25-delta risk reversal data; no signal is fabricated.
+
+    The daily put/call ratio prefers bid-side volumes when the connector
+    supplies them (put_volume_bid_side / call_volume_bid_side) and falls back
+    to total volumes.  iv_trend is a three-state classification:
+    RISING / FALLING / STABLE.
     """
     encoded = ticker.upper().strip()
     day_rows = client.get_ticker_day_state(encoded, end_date)
@@ -111,6 +116,8 @@ def analyze_unusual_whales(client: Any, ticker: str, end_date: str | None = None
     history["atm_iv30"] = _numeric_column(history, "volatility_30", 100.0)
     history["call_volume"] = _numeric_column(history, "call_volume")
     history["put_volume"] = _numeric_column(history, "put_volume")
+    history["call_volume_bid"] = _numeric_column(history, "call_volume_bid_side")
+    history["put_volume_bid"] = _numeric_column(history, "put_volume_bid_side")
     history["call_vol_avg20"] = _numeric_column(history, "avg_30_day_call_volume")
     history["iv_rank_api"] = _numeric_column(history, "iv_rank")
     history["skew"] = np.nan
@@ -134,13 +141,24 @@ def analyze_unusual_whales(client: Any, ticker: str, end_date: str | None = None
     put_volume = _finite_float(current_row.get("put_volume"))
     if call_volume is None or put_volume is None:
         raise UnusualWhalesError(f"Unusual Whales daily option-volume data is incomplete for {encoded}.")
-    pc_ratio = put_volume / call_volume if call_volume > 0 else float("nan")
+    # Bid-side volumes better reflect dealer/flow intent than total volume.
+    call_volume_bid = _finite_float(current_row.get("call_volume_bid"))
+    put_volume_bid = _finite_float(current_row.get("put_volume_bid"))
+    bid_side_usable = call_volume_bid is not None and put_volume_bid is not None and call_volume_bid > 0
+    pc_ratio = (
+        put_volume_bid / call_volume_bid if bid_side_usable
+        else (put_volume / call_volume if call_volume > 0 else float("nan"))
+    )
 
     prior = history[history["date_ts"] < trade_date].tail(252).copy()
     if prior.empty:
         prior = history.tail(252).copy()
     skew_rank = None
-    pc_rank = percentile_rank(prior["put_volume"] / prior["call_volume"].replace(0, np.nan), pc_ratio)
+    prior_pc = (
+        prior["put_volume_bid"] / prior["call_volume_bid"].replace(0, np.nan) if bid_side_usable
+        else prior["put_volume"] / prior["call_volume"].replace(0, np.nan)
+    )
+    pc_rank = percentile_rank(prior_pc, pc_ratio)
     iv_rank = _finite_float(current_row.get("iv_rank_api"))
     if iv_rank is None:
         iv_rank = percentile_rank(prior["atm_iv30"], atm_iv30)
@@ -154,6 +172,7 @@ def analyze_unusual_whales(client: Any, ticker: str, end_date: str | None = None
 
     last4_iv = history["atm_iv30"].tail(4).dropna().tolist()
     a5_iv_rising = len(last4_iv) >= 4 and last4_iv[-1] > last4_iv[-2] > last4_iv[-3] > last4_iv[-4]
+    iv_falling = len(last4_iv) >= 4 and last4_iv[-1] < last4_iv[-2] < last4_iv[-3] < last4_iv[-4]
 
     skew_value = None
     skew_delta_3d = None
@@ -234,7 +253,7 @@ def analyze_unusual_whales(client: Any, ticker: str, end_date: str | None = None
         "call_vol_ratio": safe(call_vol_ratio),
         "skew": safe(skew_value),
         "skew_delta_3d": safe(skew_delta_3d),
-        "iv_trend": "RISING" if a5 else "STABLE",
+        "iv_trend": "RISING" if a5_iv_rising else ("FALLING" if iv_falling else "STABLE"),
         "pct_below_high": safe(pct_below_high),
         "data_provider": "Unusual Whales",
         "skew_expiry": None,

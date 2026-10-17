@@ -13,6 +13,8 @@ A credential-free, three-stage pipeline that enriches `trade-jlaw-v2` rows with 
 | `scripts/transform_unusual_whales_option_data.py` | Converts connector-saved daily-state snapshots into validated `option_*` values. |
 | `scripts/report_trade_jlaw_v2_option_breakouts.py` | Creates Markdown/CSV reports and can patch only option fields with explicit `--apply`. |
 | `scripts/trade_jlaw_v2_option_contract.py` | Whitelisted 18-field update contract. |
+| `scripts/upsert_flow_verdict_rows.py` | Unpacks daily `flow-verdicts` payloads into the normalized per-symbol `flow_verdict_rows` table (also backfills existing blob rows with `--pull-from-supabase`). |
+| `sql/flow_verdict_rows.sql` | DDL for the normalized per-symbol verdict table (run once in the Supabase SQL editor). |
 | `tests/` | Fixture-based regression tests for the three stages. |
 
 This is the single canonical package location. The repository no longer contains a separate `UW-option-breakout/` root folder or duplicated split packages.
@@ -22,7 +24,7 @@ This is the single canonical package location. The repository no longer contains
 1. Run the fetch runner for a `run_date`; it writes `fetch_manifest.json`.
 2. For each manifest request, use the configured Unusual Whales connector tool `get_ticker_ohlc_latest_or_date`, then save the full MCP result envelope at the requested snapshot path.
 3. Run the transformation runner with the manifest. Review `option_transform_results.json`.
-4. Run the report runner to create Markdown and CSV artifacts. Add `--apply` only after review.
+4. Run the report runner to create Markdown and CSV artifacts, then apply. The daily flow uses `--apply --max-failure-ratio 0.02`; the runner skips all patches (and exits non-zero) when the transformation-failure share exceeds the guard. Manual review runs may omit `--apply` and re-run later.
 
 ## Credential policy
 

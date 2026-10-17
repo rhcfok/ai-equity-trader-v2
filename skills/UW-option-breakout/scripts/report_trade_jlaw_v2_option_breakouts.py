@@ -104,15 +104,18 @@ def markdown_table(rows: list[dict[str, Any]]) -> str:
     return "\n".join([header, rule, *data])
 
 
-def build_markdown(results: dict[str, Any], rows: list[dict[str, Any]], apply_requested: bool, patches: list[dict[str, Any]]) -> str:
+def build_markdown(results: dict[str, Any], rows: list[dict[str, Any]], apply_requested: bool, patches: list[dict[str, Any]], apply_skipped: str | None = None) -> str:
     failures = results["failures"]
     applied = sum(1 for patch in patches if patch.get("status") == "updated")
+    requested = "yes" if apply_requested else "no"
+    if apply_requested and apply_skipped:
+        requested = f"yes (SKIPPED: {apply_skipped})"
     lines = [
         f"# Trade JLaw V2 — Unusual Whales Option Breakout Report — {results.get('run_date', 'Unknown date')}",
         "",
         f"- **Transformed option records:** {len(rows)}",
         f"- **Transformation exceptions:** {len(failures)}",
-        f"- **Database patches requested:** {'yes' if apply_requested else 'no'}",
+        f"- **Database patches requested:** {requested}",
         f"- **Exact-row option patches applied:** {applied}",
         "",
         "## Ranked Option Breakouts",
@@ -120,6 +123,8 @@ def build_markdown(results: dict[str, Any], rows: list[dict[str, Any]], apply_re
         "",
         "## Provider Notes",
         "- Source: Unusual Whales daily ticker-state snapshots.",
+        "- Put/call ratio prefers bid-side volumes (put_volume_bid_side / call_volume_bid_side) with total-volume fallback.",
+        "- option_iv_trend is a three-state classification: RISING / FALLING / STABLE.",
         "- A1 and A6 remain false when the connector does not expose historical 25-delta risk-reversal skew data; no proxy is fabricated.",
         "- Database patches whitelist only the 18 `option_*` fields and match the exact `(id, run_date, symbol, jlaw_review_type)` row.",
     ]
@@ -166,11 +171,25 @@ def main() -> int:
     parser.add_argument("--results", required=True, help="option_transform_results.json from the transformation stage.")
     parser.add_argument("--output-dir", required=True, help="Directory for report artifacts.")
     parser.add_argument("--apply", action="store_true", help="Patch only the 18 option_* fields to their exact enhanced-JLaw rows.")
+    parser.add_argument(
+        "--max-failure-ratio",
+        type=float,
+        default=0.02,
+        help="With --apply: skip all patches when the transformation-failure share exceeds this guard (default 0.02).",
+    )
     args = parser.parse_args()
     try:
         results = load_results(Path(args.results))
         rows = report_rows(results["updates"])
-        patches = [apply_update(update) for update in results["updates"]] if args.apply else []
+        apply_skipped = None
+        if args.apply:
+            total_rows = len(results["updates"]) + len(results["failures"])
+            failure_ratio = (len(results["failures"]) / total_rows) if total_rows else 0.0
+            if not results["updates"]:
+                apply_skipped = "no_transform_updates"
+            elif failure_ratio > args.max_failure_ratio:
+                apply_skipped = f"failure_ratio_{failure_ratio:.3f}_exceeds_guard_{args.max_failure_ratio}"
+        patches = [apply_update(update) for update in results["updates"]] if (args.apply and not apply_skipped) else []
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         csv_columns = list(rows[0]) if rows else ["rank", "symbol", "option_score", "option_tier", "option_alert"]
@@ -179,19 +198,24 @@ def main() -> int:
             writer.writeheader()
             writer.writerows(rows)
         write_json(output_dir / "supabase_option_patch_results.json", patches)
-        report = build_markdown(results, rows, args.apply, patches)
+        report = build_markdown(results, rows, args.apply, patches, apply_skipped)
         (output_dir / "trade_jlaw_v2_option_breakout_report.md").write_text(report, encoding="utf-8")
         summary = {
             "run_date": results.get("run_date"),
             "reported_records": len(rows),
             "transformation_failures": len(results["failures"]),
             "apply_requested": args.apply,
+            "apply_skipped": apply_skipped,
             "patches_updated": sum(1 for patch in patches if patch.get("status") == "updated"),
             "patches_failed": sum(1 for patch in patches if patch.get("status") == "failed"),
         }
         write_json(output_dir / "report_summary.json", summary)
         print(json.dumps(summary, indent=2))
-        return 0 if not args.apply or summary["patches_failed"] == 0 else 1
+        # A requested-but-skipped apply (guard tripped) is a loud failure for the
+        # daily automation: the option layer was NOT filled for this run.
+        if args.apply and (apply_skipped or summary["patches_failed"] > 0):
+            return 1
+        return 0
     except ReportError as exc:
         print(f"REPORT ERROR: {exc}")
         return 1

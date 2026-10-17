@@ -65,7 +65,7 @@ python scripts/pull_jlaw.py --out .
 
 ## 输出
 
-写 `flow_verdicts_<date>.json` 到工作区，**并 upsert 到 Supabase 交接表 `"flow-verdicts"`**（下游 agent A 从这里签收，不读本机文件）：
+写 `flow_verdicts_<date>.json` 到工作区，**并 upsert 到 Supabase 交接表 `"flow-verdicts"`**（下游 agent A 从这里签收，不读本机文件）。完跑后**必须**再把 payload 解包成逐 symbol 行 upsert 到归一化表 `public.flow_verdict_rows`（见交接协议第 6 条），供下游 SQL 联表查询：
 
 ```json
 {
@@ -98,6 +98,7 @@ python scripts/pull_jlaw.py --out .
 3. **完跑置位**：全部查完后 `status='complete'`，`rated_count` 定稿
 4. **全覆盖兜底**：`rated_count` 必须 = `candidates_total`（`no-data` verdict 计入 rated），才可置 `complete`；若仍有 `reason='uw_error'` 的 unrated，保持 `partial` 并按 5 分钟间隔重查
 5. REST upsert：POST `/flow-verdicts`，header 加 `Prefer: resolution=merge-duplicates`
+6. **归一化行同步（完跑必做）**：status 置 `complete` 前，执行 `python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_<date>.json`，把 `verdicts[]` 逐 symbol 解包并 upsert 到 `public.flow_verdict_rows`（PK `(verdict_date, symbol)`，重复执行自动合并、幂等）。表结构见 `sql/flow_verdict_rows.sql`——**首次使用前需在 Supabase SQL 编辑器执行一次该 DDL**。存量 blob 行可用 `python scripts/upsert_flow_verdict_rows.py --pull-from-supabase` 一次性回填（6 行历史 ≈ 1,100+ 条 symbol 行）。
 
 ## 已知坑
 

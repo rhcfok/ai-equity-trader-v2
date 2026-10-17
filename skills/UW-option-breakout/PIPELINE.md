@@ -40,20 +40,22 @@ The transformer reads the manifest and connector snapshots, filters rows to the 
 | `option_a1`–`option_a8` | Fixed option-breakout conditions |
 | `option_iv30`, `option_rv20` | 30-day implied and 20-day realized volatility |
 | `option_iv_rank`, `option_skew_rank` | Volatility and skew percentile metrics |
-| `option_put_call_ratio` | Daily put/call volume ratio |
-| `option_iv_trend` | IV direction classification |
+| `option_put_call_ratio` | Daily put/call volume ratio (bid-side preferred: `put_volume_bid_side / call_volume_bid_side`; total-volume fallback) |
+| `option_iv_trend` | IV direction classification: `RISING` / `FALLING` / `STABLE` (last-4-day sequence) |
 | `option_pct_below_high` | Distance from prior 20-day high |
 
 Current connector limitation: historical 25-delta risk-reversal skew is not exposed, so **A1 and A6 remain false**. The pipeline does not invent a proxy.
 
-## Stage 3 — Report and Optional Apply
+## Stage 3 — Report and Apply
 
 **Runner:** `report_trade_jlaw_v2_option_breakouts.py`
 **Skill:** `trade-jlaw-v2-option-report`
 
-By default the report runner generates a ranked Markdown report, CSV export, and patch audit JSON. It does not modify Supabase.
+The report runner generates a ranked Markdown report, CSV export, and patch audit JSON.
 
-After review, run with `--apply` to patch only the 18 `option_*` fields. Every patch includes all four identity predicates and must update exactly one row; a mismatch is a failure.
+The daily flow runs the runner with `--apply --max-failure-ratio 0.02`: patches are applied automatically whenever the transform produced at least one update and the transformation-failure share is at or below the guard (0.02). Every patch includes all four identity predicates and must update exactly one row; a mismatch is a failure. A run whose apply was skipped by the guard, or that had any failed patch, exits non-zero so the automation surfaces that the option layer was not filled for that run_date.
+
+Manual review runs may omit `--apply` to produce report-only artifacts, then re-run with `--apply` to patch only the 18 `option_*` fields.
 
 ## Artifacts
 

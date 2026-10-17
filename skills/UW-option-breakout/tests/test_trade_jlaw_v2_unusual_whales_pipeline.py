@@ -63,6 +63,32 @@ class TradeJlawV2OptionPipelineTests(unittest.TestCase):
             for index, (day, iv, price) in enumerate(zip(dates, implied, prices))
         ]
 
+    @staticmethod
+    def snapshot_rows_bid_side() -> list[dict]:
+        """Variant where bid-side volumes disagree with totals and IV is falling.
+
+        Totals give a 1.0 put/call ratio (A2 false); bid-side gives 0.2
+        (A2 true), so the test proves bid-side preference. The last four IV
+        observations fall, so option_iv_trend must be FALLING and A5 false.
+        """
+        dates = pd.bdate_range(end="2026-10-08", periods=260)
+        implied = [0.15] * 256 + [0.20, 0.12, 0.11, 0.10]
+        prices = [100.0] * 240 + [95.0 if index % 2 == 0 else 100.0 for index in range(20)]
+        return [
+            {
+                "date": day.strftime("%Y-%m-%d"),
+                "close": price,
+                "volatility_30": iv,
+                "iv_rank": 50.0 if index == len(dates) - 1 else 10.0,
+                "call_volume": 300,
+                "put_volume": 300,
+                "call_volume_bid_side": 500 if index == len(dates) - 1 else 100,
+                "put_volume_bid_side": 100,
+                "avg_30_day_call_volume": 100,
+            }
+            for index, (day, iv, price) in enumerate(zip(dates, implied, prices))
+        ]
+
     def test_fetch_manifest_deduplicates_by_enhanced_jlaw_identity(self) -> None:
         rows = normalize_rows(self.source_rows(), "2026-10-08")
         self.assertEqual(len(rows), 2)
@@ -93,6 +119,22 @@ class TradeJlawV2OptionPipelineTests(unittest.TestCase):
         self.assertEqual(db_patch_payload(update), {column: update[column] for column in OPTION_COLUMNS})
         self.assertNotIn("jlaw_score", db_patch_payload(update))
         self.assertNotIn("classification", db_patch_payload(update))
+
+    def test_transform_prefers_bid_side_pcr_and_reports_falling_iv_trend(self) -> None:
+        rows = normalize_rows(self.source_rows(), "2026-10-08")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshots = Path(tmpdir) / "snapshots"
+            snapshots.mkdir()
+            manifest = build_manifest(rows, "2026-10-08", snapshots, 500)
+            (snapshots / "TEST.json").write_text(json.dumps({"structuredContent": {"result": self.snapshot_rows_bid_side()}}), encoding="utf-8")
+            updates, failures = transform_manifest(manifest)
+        self.assertEqual(failures, [])
+        update = updates[0]
+        # Totals would give 1.0; bid-side preference must yield 0.2.
+        self.assertAlmostEqual(update["option_put_call_ratio"], 0.2, places=4)
+        self.assertTrue(update["option_a2"])
+        self.assertFalse(update["option_a5"])
+        self.assertEqual(update["option_iv_trend"], "FALLING")
 
     def test_report_is_ranked_and_contains_identity_context(self) -> None:
         rows = normalize_rows(self.source_rows(), "2026-10-08")
