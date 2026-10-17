@@ -53,7 +53,7 @@ This weekly workflow is authorized to apply eligible Supabase watchlist changes 
 
 ## Environment and weekly letter registry
 
-Same as the daily skill (see `../daily/SKILL.md`): pipeline at `D:\AI projects\AI-trading\substack-intel\`, proxy `127.0.0.1:6268`, WebBridge `127.0.0.1:10086/command` session `substack-digest` for paid access. Weekly coverage registry:
+Same as the daily skill (see `../daily/SKILL.md`): pipeline at `D:\AI projects\AI-trading\substack-intel\`, local proxy with port resolved at runtime from the Windows system proxy settings (has moved between `127.0.0.1:6268` and `127.0.0.1:7892`), WebBridge `127.0.0.1:10086/command` session `substack-digest` for paid access. Weekly coverage registry:
 
 `fomo` (www.fomosoc.com), `damnang` (damnang.com), `nutty` (nuttycld.substack.com), `photoncap` (photoncap.net), `mimivsjames` + `mimivsjames2` (Substack main/strategy), `funda` (fundaai.substack.com), `tsp` (techstockprospector.substack.com), `streetalpha` (streetalpha.substack.com; post files `StreetAlpha__*`), and `kova` (kovainvest.substack.com; post files `KovaInvestmentResearch__*`). Dick Capital is not scanned or summarized by this weekly skill; the separate daily skill may continue to cover it.
 
