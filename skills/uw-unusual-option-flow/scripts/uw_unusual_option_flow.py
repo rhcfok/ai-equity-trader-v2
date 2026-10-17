@@ -826,6 +826,12 @@ def no_signal_result(ticker: str, category: str | None, event_date: str, pa_trad
         "unusual_premium": 0.0,
         "net_directional_premium": 0.0,
         "directional_confidence": 0.0,
+        "bullish_z": None,
+        "bearish_z": None,
+        "net_bias_z": None,
+        "bullish_pct": None,
+        "bearish_pct": None,
+        "net_bias_pct": None,
         "net_option_flow_bias": "no_data",
         "bias_strength": "none",
         "dominant_structure": "none",
@@ -838,6 +844,61 @@ def no_signal_result(ticker: str, category: str | None, event_date: str, pa_trad
     }
 
 
+def apply_cross_sectional_scores(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add per-signal_date cross-sectional z-scores and percentile ranks.
+
+    Convention matches the SQL backfill of option_flow_symbol_signals:
+    z-scores of bullish_flow_score, bearish_flow_score, and their difference
+    within the day's full signal set, plus strict-less-than percentile ranks
+    (0-100). Days with a single row or zero variance receive None. Raw dollar
+    columns are kept untouched for audit.
+    """
+    by_date: dict[str, list[dict[str, Any]]] = {}
+    for row in results:
+        by_date.setdefault(str(row.get("signal_date")), []).append(row)
+
+    def mean_std(values: list[float | None]) -> tuple[float | None, float | None]:
+        clean = [value for value in values if value is not None]
+        if not clean:
+            return None, None
+        mean = sum(clean) / len(clean)
+        if len(clean) < 2:
+            return mean, None  # matches SQL stddev() -> NULL on a single value
+        variance = sum((value - mean) ** 2 for value in clean) / (len(clean) - 1)
+        return mean, math.sqrt(variance)
+
+    def zscore(value: float | None, mean: float | None, std: float | None) -> float | None:
+        if value is None or mean is None or not std:
+            return None
+        return round((value - mean) / std, 4)
+
+    def pct_rank(values: list[float | None], value: float | None) -> float | None:
+        if value is None or len(values) < 2:
+            return None
+        strictly_less = sum(1 for item in values if item is not None and item < value)
+        return round(strictly_less / (len(values) - 1) * 100, 2)
+
+    for rows in by_date.values():
+        bull_mean, bull_std = mean_std([row.get("bullish_flow_score") for row in rows])
+        bear_mean, bear_std = mean_std([row.get("bearish_flow_score") for row in rows])
+        net_values = [
+            ((row.get("bullish_flow_score") or 0.0) - (row.get("bearish_flow_score") or 0.0))
+            for row in rows
+        ]
+        net_mean, net_std = mean_std(net_values)
+        for row in rows:
+            bull = row.get("bullish_flow_score")
+            bear = row.get("bearish_flow_score")
+            net = (bull - bear) if (bull is not None and bear is not None) else None
+            row["bullish_z"] = zscore(bull, bull_mean, bull_std)
+            row["bearish_z"] = zscore(bear, bear_mean, bear_std)
+            row["net_bias_z"] = zscore(net, net_mean, net_std)
+            row["bullish_pct"] = pct_rank([r.get("bullish_flow_score") for r in rows], bull)
+            row["bearish_pct"] = pct_rank([r.get("bearish_flow_score") for r in rows], bear)
+            row["net_bias_pct"] = pct_rank(net_values, net)
+    return results
+
+
 def signal_payload(result: dict[str, Any]) -> dict[str, Any]:
     columns = (
         "ticker", "signal_date", "current_price", "total_call_premium", "total_put_premium",
@@ -846,6 +907,7 @@ def signal_payload(result: dict[str, Any]) -> dict[str, Any]:
         "hedging_flow_score", "net_option_flow_bias", "dominant_structure", "top_contracts",
         "option_flow_summary", "jlaw_source_row", "unusual_premium", "net_directional_premium",
         "directional_confidence", "bias_strength", "iv_rising_unusual_count",
+        "bullish_z", "bearish_z", "net_bias_z", "bullish_pct", "bearish_pct", "net_bias_pct",
     )
     return {column: result.get(column) for column in columns}
 
@@ -934,6 +996,7 @@ def run_flow(
         report.processed_symbols += 1
         report.signal_count += 1
         logging.info("%s: %s", ticker, result["option_flow_summary"])
+    apply_cross_sectional_scores(report.results)
     if write_supabase:
         if not (supabase_base and supabase_key):
             raise RunnerError("SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) are required with --write-supabase")
