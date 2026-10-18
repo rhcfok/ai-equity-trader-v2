@@ -36,11 +36,22 @@ The runners accept a private `--dotenv` file. Never commit it.
 
 ## One-time database setup (Workflow B only)
 
-Run `scripts/migrations/20261018_darkpool.sql` once in the Supabase SQL
-editor. It creates `darkpool_prints` and adds the `dp_*` columns to
-`option-opportunity-davis`. Until the migration is applied, `--write-supabase`
-will skip the opportunity patch and log a warning, and the raw-print insert
-will fail with a table-not-found error.
+Apply `scripts/migrations/20261018_darkpool.sql` once — it creates
+`darkpool_prints` and adds the `dp_*` columns to `option-opportunity-davis`.
+Two equivalent ways:
+
+```bash
+# via the Management API (requires SUPABASE_ACCESS_TOKEN in env or --dotenv)
+python3 skills/uw-unusual-option-flow/scripts/apply_migrations.py \
+  --dotenv /secure/uw-flow.env
+```
+
+or paste the same file in the Supabase **SQL editor**. Both are idempotent;
+`apply_migrations.py` records each file's SHA-256 in
+`uw_unusual_option_flow_cache/migrations_applied.json` and skips already-applied
+files on re-runs. Until the migration is applied, `--write-supabase` will skip
+the opportunity patch and log a warning, and the raw-print insert will fail
+with a table-not-found error.
 
 ---
 
@@ -200,6 +211,7 @@ refetch.
 | Symptom | Action |
 | --- | --- |
 | Dark pool `401`/`403` | Check the token entitlement for `/api/darkpool`. |
-| `darkpool_prints` insert 404 | Run `scripts/migrations/20261018_darkpool.sql` in the Supabase SQL editor. |
-| Opportunity patch 400/404 | Migration not applied, or no `option-opportunity-davis` rows for that symbol/date — warning only, not an error. |
+| `darkpool_prints` insert 404 | Apply `scripts/migrations/20261018_darkpool.sql` (SQL editor or `apply_migrations.py`). |
+| Opportunity patch 400 | Inspect the Supabase error code in the audit; `22P02`-style type errors mean a payload/schema mismatch to fix in the runner. |
+| Opportunity patch 404 | Migration not applied, or no `option-opportunity-davis` rows for that symbol/date — warning only, not an error. |
 | Symbol with no prints | Recorded as skipped; valid outcome. |

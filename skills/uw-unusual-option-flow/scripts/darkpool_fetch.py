@@ -144,7 +144,8 @@ def reduce_prints(prints: list[dict[str, Any]], symbol: str, cfg: DarkPoolConfig
             continue
         usable.append(item)
 
-    total = buy = sell = blocks = block_premium = 0.0
+    total = buy = sell = block_premium = 0.0
+    blocks = 0
     level_premium: dict[str, float] = {}
     timestamps: list[str] = []
     last_price: float | None = None
