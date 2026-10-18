@@ -159,9 +159,57 @@ accumulating this wheel candidate?" before selling puts against it.
 3. Writes (with `--write-supabase`):
    - every usable raw print to `darkpool_prints` with duplicate-ignore on
      `(symbol, executed_at, tracking_id)` — safe to re-run;
-   - the daily summary to the `dp_*` columns of `option-opportunity-davis`
-     rows for `report_date = --opportunity-date` (default today, Eastern).
-     A symbol with zero opportunity rows that day is a harmless no-op patch.
+   - the daily summary to **`darkpool_symbol_daily`** (one row per
+     `symbol`/`fetch_date`, upserted on the primary key) — this is the table
+     the daily opportunity generation step joins at publish time;
+   - optionally (backfill mode only, `--patch-opportunity`) the `dp_*`
+     columns of `option-opportunity-davis` rows for
+     `report_date = --opportunity-date`. The daily pipeline does **not** use
+     this mode; it fills `dp_*` from `darkpool_symbol_daily` at generation
+     time so run ordering does not matter.
+
+## Recommended daily order
+
+```text
+1. Workflow A (unusual flow)     -> option_flow_symbol_signals      (watchlist core,satellite,watch1)
+2. Workflow B (dark pool)        -> darkpool_prints + darkpool_symbol_daily   (same watchlist)
+3. jlaw scan / verdicts / GEX    -> trade-jlaw-v2, flow-verdicts, gex_snapshot
+4. Opportunity generation        -> option-opportunity-davis (joins 1 + 2 + 3)
+```
+
+Steps 1 and 2 resolve the same US-listed ticker list from the `watchlist`
+table by default (`core,satellite,watch1`), so run them without `--symbols`.
+Step 4 must read `darkpool_symbol_daily` — not the raw print table.
+
+## Step 4 integration (join contract)
+
+For each candidate at publish time (report_date = `fetch_date`):
+
+```sql
+select * from darkpool_symbol_daily
+ where fetch_date = :report_date and symbol = :symbol;
+```
+
+and map the row into the opportunity's `dp_*` columns:
+
+```python
+dp = daily_row  # darkpool_symbol_daily row, {} if missing
+mapping = {
+    "dp_as_of": dp.get("updated_at"),
+    "dp_total_premium_mm": dp.get("total_premium") / 1_000_000,
+    "dp_buy_mm": dp.get("buy_premium") / 1_000_000,
+    "dp_sell_mm": dp.get("sell_premium") / 1_000_000,
+    "dp_net_mm": dp.get("net_premium") / 1_000_000,
+    "dp_blocks": dp.get("block_count"),
+    "dp_top_level": dp.get("top_level"),
+    "dp_top_level_mm": dp.get("top_level_premium") / 1_000_000,
+    "dp_accumulating": dp.get("accumulating"),
+}
+```
+
+Suggested caution codes for the opportunity layer:
+`DP_DISTRIBUTION` (net dark-pool premium negative on a bullish structure),
+`DP_NO_DATA` (no `darkpool_symbol_daily` row for the report date).
 
 ## Interpretation rules (how to consume dp_*)
 
@@ -194,12 +242,19 @@ python3 skills/uw-unusual-option-flow/scripts/darkpool_fetch.py \
   --symbols ADI,CRM,SNOW \
   --output out/uw_darkpool_dry.json
 
-# full watchlist, write raw prints + patch opportunities
+# full watchlist: raw prints + darkpool_symbol_daily upserts (default write mode)
 python3 skills/uw-unusual-option-flow/scripts/darkpool_fetch.py \
   --dotenv /secure/uw-flow.env \
   --write-supabase \
   --opportunity-date 2026-10-17 \
   --output out/uw_darkpool_2026-10-17.json
+
+# backfill dp_* onto existing opportunity rows (one-off; not part of the daily order)
+python3 skills/uw-unusual-option-flow/scripts/darkpool_fetch.py \
+  --dotenv /secure/uw-flow.env \
+  --write-supabase --patch-opportunity \
+  --opportunity-date 2026-10-17 \
+  --output out/uw_darkpool_2026-10-17_backfill.json
 ```
 
 Cached print dumps live under `uw_unusual_option_flow_cache/darkpool/`

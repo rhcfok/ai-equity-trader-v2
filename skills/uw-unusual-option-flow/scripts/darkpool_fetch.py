@@ -8,8 +8,12 @@ JSON audit artifact, and optionally writes to Supabase:
 
 - raw prints  -> ``darkpool_prints`` (insert with duplicate-ignore on
   ``(symbol, executed_at, tracking_id)``)
-- aggregates  -> ``dp_*`` columns on ``option-opportunity-davis`` rows for the
-  same symbol and report date (the Davis CSP/BPS opportunity layer)
+- aggregates  -> ``darkpool_symbol_daily`` (one row per symbol/fetch_date,
+  upserted on the primary key — the table the daily opportunity generation
+  step joins at publish time)
+- optional    -> ``dp_*`` columns on ``option-opportunity-davis`` rows for the
+  same symbol and report date, only with ``--patch-opportunity`` (backfill
+  mode; the daily pipeline fills dp_* from ``darkpool_symbol_daily`` instead)
 
 No orders are placed and no brokerage is accessed.
 """
@@ -33,6 +37,7 @@ from urllib3.util.retry import Retry
 MODEL_VERSION = "Unusual Whales Dark Pool Accumulation v1.0"
 UW_BASE_URL = "https://api.unusualwhales.com"
 DEFAULT_RAW_TABLE = "darkpool_prints"
+DEFAULT_DAILY_TABLE = "darkpool_symbol_daily"
 DEFAULT_OPPORTUNITY_TABLE = "option-opportunity-davis"
 DEFAULT_WATCHLIST_TABLE = "watchlist"
 DEFAULT_CATEGORIES = ("core", "satellite", "watch1")
@@ -226,6 +231,29 @@ def opportunity_payload(agg: dict[str, Any], as_of: str) -> dict[str, Any]:
     }
 
 
+def daily_payload(agg: dict[str, Any], fetch_date: str, as_of: str) -> dict[str, Any]:
+    """Row shape for ``darkpool_symbol_daily`` (one per symbol/fetch_date)."""
+    return {
+        "symbol": agg["symbol"],
+        "fetch_date": fetch_date,
+        "window_start": agg["window_start"],
+        "window_end": agg["window_end"],
+        "print_count": agg["print_count"],
+        "total_premium": agg["total_premium"],
+        "buy_premium": agg["buy_premium"],
+        "sell_premium": agg["sell_premium"],
+        "net_premium": agg["net_premium"],
+        "block_count": agg["block_count"],
+        "block_premium": agg["block_premium"],
+        "top_level": agg["top_level"],
+        "top_level_premium": agg["top_level_premium"],
+        "above_close_premium": agg["above_close_premium"],
+        "below_close_premium": agg["below_close_premium"],
+        "accumulating": agg["accumulating"],
+        "updated_at": as_of,
+    }
+
+
 def print_row(item: dict[str, Any]) -> dict[str, Any] | None:
     """Map one raw UW print to the ``darkpool_prints`` schema (None = unusable)."""
     tracking = _int(item.get("tracking_id"))
@@ -319,6 +347,24 @@ def write_raw_prints(session: requests.Session, supabase_base: str, supabase_key
     return written
 
 
+def write_daily_upsert(session: requests.Session, supabase_base: str, supabase_key: str,
+                       rows: list[dict[str, Any]], daily_table: str) -> int:
+    url = f"{supabase_base}/rest/v1/{daily_table}"
+    written = 0
+    for start in range(0, len(rows), 500):
+        chunk = rows[start:start + 500]
+        response = session.post(
+            f"{url}?on_conflict=symbol,fetch_date",
+            headers=supabase_headers(supabase_key, "resolution=merge-duplicates, return=minimal"),
+            json=chunk,
+            timeout=120,
+        )
+        if not response.ok:
+            raise RunnerError(f"darkpool_symbol_daily upsert failed ({response.status_code}): {response.text[:400]}")
+        written += len(chunk)
+    return written
+
+
 def patch_opportunity(session: requests.Session, supabase_base: str, supabase_key: str,
                       symbol: str, opportunity_date: str, payload: dict[str, Any],
                       opportunity_table: str) -> bool:
@@ -389,10 +435,13 @@ def execute(args: argparse.Namespace) -> tuple[DarkPoolReport, Path]:
                 if raw_rows:
                     agg["supabase"]["prints_written"] = write_raw_prints(
                         session, supabase_base, supabase_key, raw_rows, args.raw_table)
-                patched = patch_opportunity(
-                    session, supabase_base, supabase_key, symbol, args.opportunity_date,
-                    opportunity_payload(agg, started), args.opportunity_table)
-                agg["supabase"]["opportunity_patched"] = patched
+                agg["supabase"]["daily_written"] = write_daily_upsert(
+                    session, supabase_base, supabase_key,
+                    [daily_payload(agg, args.opportunity_date, started)], args.daily_table)
+                if args.patch_opportunity:
+                    agg["supabase"]["opportunity_patched"] = patch_opportunity(
+                        session, supabase_base, supabase_key, symbol, args.opportunity_date,
+                        opportunity_payload(agg, started), args.opportunity_table)
             report.symbols.append(agg)
             report.processed_symbols += 1
         except Exception as exc:  # per-symbol isolation: one failure does not stop the run
@@ -414,7 +463,7 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--categories", default=",".join(DEFAULT_CATEGORIES))
     parser.add_argument("--max-symbols", type=int, default=200)
     parser.add_argument("--opportunity-date", default=datetime.now(EASTERN).date().isoformat(),
-                        help="report_date on option-opportunity-davis rows to patch (YYYY-MM-DD)")
+                        help="fetch_date for darkpool_symbol_daily and report_date for --patch-opportunity (YYYY-MM-DD)")
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE)
     parser.add_argument("--include-derivative", action="store_true",
                         help="include derivative_priced prints in the aggregate")
@@ -423,7 +472,10 @@ def make_parser() -> argparse.ArgumentParser:
                         help="output directory or JSON file")
     parser.add_argument("--write-supabase", action="store_true")
     parser.add_argument("--raw-table", default=optional_env("SUPABASE_DARKPOOL_TABLE", DEFAULT_RAW_TABLE))
+    parser.add_argument("--daily-table", default=optional_env("SUPABASE_DARKPOOL_DAILY_TABLE", DEFAULT_DAILY_TABLE))
     parser.add_argument("--opportunity-table", default=optional_env("SUPABASE_OPPORTUNITY_TABLE", DEFAULT_OPPORTUNITY_TABLE))
+    parser.add_argument("--patch-opportunity", action="store_true",
+                        help="also patch dp_* onto option-opportunity-davis rows (backfill mode; the daily pipeline joins darkpool_symbol_daily instead)")
     parser.add_argument("--uw-base-url", default=optional_env("UW_BASE", UW_BASE_URL))
     parser.add_argument("--uw-client-api-id", default=optional_env("UW_CLIENT_API_ID", "100001"))
     parser.add_argument("--timeout", type=int, default=60)
@@ -478,6 +530,13 @@ def self_test() -> dict[str, Any]:
     checks += 1
     row_codes = print_row({**prints[0], "sale_cond_codes": ["average_price_trade"]})
     assert row_codes["sale_cond_codes"] == '["average_price_trade"]'
+    checks += 1
+    daily = daily_payload(agg, "2026-10-17", "2026-10-17T00:00:00Z")
+    assert daily["symbol"] == "XYZ" and daily["fetch_date"] == "2026-10-17"
+    checks += 1
+    assert daily["print_count"] == 3 and daily["block_count"] == 1 and daily["accumulating"] is True
+    checks += 1
+    assert daily["net_premium"] == 149302.0 and daily["top_level"] == 10.02 and daily["window_end"] == "2026-10-16T14:02:00Z"
     checks += 1
     return {"ok": True, "checks": checks, "model_version": MODEL_VERSION}
 
