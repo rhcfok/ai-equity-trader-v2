@@ -15,6 +15,8 @@ A credential-free, three-stage pipeline that enriches `trade-jlaw-v2` rows with 
 | `scripts/trade_jlaw_v2_option_contract.py` | Whitelisted 18-field update contract. |
 | `scripts/upsert_flow_verdict_rows.py` | Unpacks daily `flow-verdicts` payloads into the normalized per-symbol `flow_verdict_rows` table (also backfills existing blob rows with `--pull-from-supabase`). |
 | `sql/flow_verdict_rows.sql` | DDL for the normalized per-symbol verdict table (run once in the Supabase SQL editor). |
+| `sql/option_opportunity.sql` | DDL for the daily opportunity ledger `public.option_opportunity` (run once in the Supabase SQL editor). |
+| `references/option_opportunity_contract.md` | Data contract: row identity, lifecycle/outcome states, win-rate formula, economics conventions. |
 | `tests/` | Fixture-based regression tests for the three stages. |
 
 This is the single canonical package location. The repository no longer contains a separate `UW-option-breakout/` root folder or duplicated split packages.
