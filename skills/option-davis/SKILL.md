@@ -13,7 +13,7 @@ Wraps the Davis playbook (short puts / bull put spreads / bear call spreads) aro
 - Credentials via environment variables or `--dotenv` (never hardcoded):
   - `SUPABASE_URL`, `SUPABASE_KEY` (or `SUPABASE_SERVICE_ROLE_KEY`)
   - `UW_API_KEY` (or `UNUSUAL_WHALES_API_KEY`); optional `UW_BASE` (default `https://api.unusualwhales.com`)
-- Upstream tables fresh from the daily pipelines: `flow_verdict_rows` (normalized verdicts), `option_flow_symbol_signals` (with z-score columns), `trade-jlaw-v2` (option layer applied), `gex_snapshot`.
+- Upstream tables fresh from the daily pipelines: `flow_verdict_rows` (normalized verdicts), `option_flow_symbol_signals` (with z-score columns), `trade-jlaw-v2` (option layer applied), `gex_snapshot`, and `darkpool_symbol_daily` (dark pool accumulation aggregates; optional enricher — missing rows degrade to `DP_NO_DATA` cautions, not failures).
 - Ledger table exists: `sql/option_opportunity.sql` under `skills/UW-option-breakout/sql/` (contract: `skills/UW-option-breakout/references/option_opportunity_contract.md`).
 
 ## Run procedure
@@ -69,6 +69,7 @@ One row per published opportunity, keyed by `opportunity_key = report_date|strat
 - DTE ≤ 45; expiry picked at ~32 DTE.
 - Annualized premium filter: `credit / strike / dte * 365 >= 20%` (`davis_annualized_ok`).
 - Earnings firewall: earnings strictly after expiry (`earnings_clear`); names inside the window go to the post-earnings watchlist.
+- Dark pool enricher: `darkpool_symbol_daily` accumulation confirms bull candidates (+1.5 score); distribution warns (`DP_DISTRIBUTION`), missing data warns (`DP_NO_DATA`). The ledger row carries the `dp_*` snapshot columns.
 - Risk 5–7% of capital per trade via buying-power reduction; decide at 21 DTE.
 
 Full scoring weights and economics: [references/methodology.md](references/methodology.md).
@@ -80,5 +81,6 @@ Full scoring weights and economics: [references/methodology.md](references/metho
 | Missing credentials | Runner exits with the missing names; provide env vars or `--dotenv`. |
 | Supabase/UW network error | Built-in retries (4x backoff for reads; chains fail per symbol and are skipped). Re-run; idempotent. |
 | Fewer than 5 candidates | Upstream option layer may not be applied yet; wait ~20 minutes and re-run. If still short, log a `NO_QUALIFIED_SETUP` trace row (strategy `NO_QUALIFIED_SETUP`, symbol `--`) so the day is not silently blank. |
+| Dark pool table missing/empty | Runner prints a warning and continues with `DP_NO_DATA` cautions; candidates are still scored on the other signals. |
 | Ledger write failure | Runner exits non-zero with the response body; rows are merged on re-run. |
 | Quote stale/wide | Legs with zero bid are marked `quote_status=stale` and the row is skipped for publishing. |

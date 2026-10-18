@@ -79,6 +79,9 @@ class LedgerRowTests(unittest.TestCase):
             "gex_ts": "2026-10-16T06:00:00+00:00",
             "gex_net": 0.09,
             "gravity": "up",
+            "dp": None,
+            "dp_net_mm": None,
+            "dp_accumulating": None,
             "score": 12.5,
         }
         base.update(overrides)
@@ -101,7 +104,9 @@ class LedgerRowTests(unittest.TestCase):
         self.assertAlmostEqual(row["annualized_pct"], round(6.75 / 230 / 32 * 365 * 100, 2))
         self.assertTrue(row["davis_annualized_ok"])
         self.assertTrue(row["delta_band_ok"])
-        self.assertIsNone(row["caution"])
+        self.assertEqual(row["caution"], "DP_NO_DATA")
+        self.assertIsNone(row["dp_net_mm"])
+        self.assertIn("dp_accumulating", row)
 
     def test_spread_row_economics(self) -> None:
         short = self.put(125.0, 7.00, 7.30, 0.31)
@@ -121,6 +126,39 @@ class LedgerRowTests(unittest.TestCase):
     def test_zero_credit_rejected(self) -> None:
         short = self.put(230.0, 0.0, 0.0, 0.3)
         self.assertIsNone(runner.opportunity_row(self.candidate(), "SHORT_PUT", short, None, 239.56))
+
+    @staticmethod
+    def dp_map(net: float, accumulating: bool) -> dict:
+        return {
+            "dp_as_of": "2026-10-17T00:00:00+00:00",
+            "dp_total_premium_mm": 12.5,
+            "dp_buy_mm": 7.5,
+            "dp_sell_mm": 5.0,
+            "dp_net_mm": round(net / 1e6, 2),
+            "dp_blocks": 5,
+            "dp_top_level": 300.0,
+            "dp_top_level_mm": 8.0,
+            "dp_accumulating": accumulating,
+        }
+
+    def test_dp_map_merged_into_row(self) -> None:
+        short = self.put(230.0, 6.75, 7.69, 0.33)
+        candidate = self.candidate(dp=self.dp_map(2_500_000, True), dp_net_mm=2.5, dp_accumulating=True)
+        row = runner.opportunity_row(candidate, "SHORT_PUT", short, None, 239.56)
+        self.assertEqual(row["dp_net_mm"], 2.5)
+        self.assertEqual(row["dp_blocks"], 5)
+        self.assertTrue(row["dp_accumulating"])
+        self.assertNotIn("DP_NO_DATA", row["caution"] or "")
+        self.assertNotIn("DP_DISTRIBUTION", row["caution"] or "")
+
+    def test_dp_distribution_caution_only_for_non_bear(self) -> None:
+        short = self.put(230.0, 6.75, 7.69, 0.33)
+        call = {"strike": 250.0, "ctype": "C", "bid": 6.0, "ask": 6.4, "iv": 0.4, "delta": 0.31, "oi": 500.0}
+        candidate = self.candidate(dp=self.dp_map(-2_200_000, False), dp_net_mm=-2.2, dp_accumulating=False)
+        row_put = runner.opportunity_row(candidate, "SHORT_PUT", short, None, 239.56)
+        self.assertIn("DP_DISTRIBUTION", row_put["caution"])
+        row_bear = runner.opportunity_row(candidate, "BEAR_CALL_SPREAD", call, None, 239.56)
+        self.assertNotIn("DP_DISTRIBUTION", row_bear["caution"] or "")
 
     def test_delta_band_and_annualized_flags(self) -> None:
         short = self.put(220.0, 4.0, 4.5, 0.19)  # below band

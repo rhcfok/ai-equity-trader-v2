@@ -38,6 +38,7 @@ FLOW_DATE = ""
 JLAW_DATE = ""
 VERDICT_DATE = ""
 GEX_FROM = ""
+DP_DATE = ""
 RUN_ID = uuid.uuid4().hex
 NOW_ISO = datetime.now(timezone.utc).isoformat()
 LOGGED = 0
@@ -183,8 +184,12 @@ def opportunity_row(candidate: dict, strategy: str, short: dict, long: dict | No
         cautions.append("THIN_OI")
     if not candidate.get("earn_ok"):
         cautions.append("EARNINGS_INSIDE_WINDOW")
+    if candidate.get("dp") is None:
+        cautions.append("DP_NO_DATA")
+    elif candidate.get("dp_accumulating") is False and strategy != "BEAR_CALL_SPREAD":
+        cautions.append("DP_DISTRIBUTION")
     side_letter = "C" if strategy == "BEAR_CALL_SPREAD" else "P"
-    return {
+    row = {
         "opportunity_key": f"{REPORT_DATE}|{strategy}|{candidate['symbol']}|{EXP_MAIN}|{short['strike']:.0f}",
         "run_id": RUN_ID,
         "report_date": REPORT_DATE,
@@ -248,6 +253,17 @@ def opportunity_row(candidate: dict, strategy: str, short: dict, long: dict | No
         "caution": "; ".join(cautions) or None,
         "notes": "Quotes = latest session close; re-verify before entry.",
     }
+    if candidate.get("dp"):
+        row.update(candidate["dp"])
+    else:
+        # The daily aggregate table is the single source of truth: explicitly
+        # null dp_* so legacy values from the old patch mode cannot linger.
+        for key in (
+            "dp_as_of", "dp_total_premium_mm", "dp_buy_mm", "dp_sell_mm",
+            "dp_net_mm", "dp_blocks", "dp_top_level", "dp_top_level_mm", "dp_accumulating",
+        ):
+            row[key] = None
+    return row
 
 
 def upsert_opportunity(base: str, key: str, row: dict) -> int:
@@ -306,6 +322,23 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
     verdicts = sb_get(base, cfg["SUPABASE_KEY"], "flow_verdict_rows", select="*", verdict_date=f"eq.{VERDICT_DATE}")
     gex = sb_get(base, cfg["SUPABASE_KEY"], "gex_snapshot", select="*", snapshot_ts=f"gte.{GEX_FROM}", order="snapshot_ts.asc")
 
+    # Dark pool enricher: join the latest darkpool_symbol_daily aggregates.
+    # Absent table/rows degrades to DP_NO_DATA cautions instead of failing.
+    dp_idx: dict[str, dict] = {}
+    try:
+        dp_top = sb_get(base, cfg["SUPABASE_KEY"], "darkpool_symbol_daily", select="fetch_date", order="fetch_date.desc", limit="1")
+        if dp_top:
+            DP_DATE = str(dp_top[0]["fetch_date"])[:10]
+            dp_rows = sb_get(base, cfg["SUPABASE_KEY"], "darkpool_symbol_daily", select="*", fetch_date=f"eq.{DP_DATE}")
+            for row in dp_rows:
+                if row.get("symbol"):
+                    dp_idx[row["symbol"]] = row
+            print(f"darkpool: date={DP_DATE} symbols={len(dp_idx)}")
+        else:
+            print("darkpool: no rows — dark pool signals disabled")
+    except Exception as exc:
+        print(f"darkpool load failed ({type(exc).__name__}) — dark pool signals disabled")
+
     j_idx, f_idx, v_idx, g_idx = {}, {}, {}, {}
     for row in jlaw:
         symbol = row.get("symbol")
@@ -321,13 +354,27 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
         g_idx[row.get("symbol")] = row
     print(f"loaded: jlaw={len(j_idx)} flow={len(f_idx)} verdicts={len(v_idx)} gex={len(g_idx)}")
 
-    def enrich(symbol: str, verdict: dict, jlaw_row: dict, flow_row: dict | None, gex_row: dict | None) -> dict:
+    def enrich(symbol: str, verdict: dict, jlaw_row: dict, flow_row: dict | None, gex_row: dict | None, dp_row: dict | None) -> dict:
         iv_rank = fnum(jlaw_row.get("option_iv_rank"), 0.0)
         spot = fnum(jlaw_row.get("current_price")) or fnum((gex_row or {}).get("spot_price"))
         put_wall = fnum((gex_row or {}).get("put_wall"))
         call_wall = fnum((gex_row or {}).get("call_wall"))
         pw = round(100 * (spot - put_wall) / spot, 1) if put_wall and spot and put_wall < spot else None
         cw = round(100 * (call_wall - spot) / spot, 1) if call_wall and spot and call_wall > spot else None
+        dp_net_mm = round(fnum((dp_row or {}).get("net_premium"), 0.0) / 1e6, 2) if dp_row else None
+        dp_map = None
+        if dp_row:
+            dp_map = {
+                "dp_as_of": dp_row.get("window_end") or dp_row.get("fetch_date"),
+                "dp_total_premium_mm": round(fnum(dp_row.get("total_premium"), 0.0) / 1e6, 2),
+                "dp_buy_mm": round(fnum(dp_row.get("buy_premium"), 0.0) / 1e6, 2),
+                "dp_sell_mm": round(fnum(dp_row.get("sell_premium"), 0.0) / 1e6, 2),
+                "dp_net_mm": dp_net_mm,
+                "dp_blocks": int(fnum(dp_row.get("block_count"), 0)),
+                "dp_top_level": fnum(dp_row.get("top_level")),
+                "dp_top_level_mm": round(fnum(dp_row.get("top_level_premium"), 0.0) / 1e6, 2),
+                "dp_accumulating": bool(dp_row.get("accumulating")),
+            }
         return {
             "symbol": symbol,
             "verdict": verdict["verdict"],
@@ -357,6 +404,9 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
             "gex_ts": (gex_row or {}).get("snapshot_ts"),
             "gex_net": fnum((gex_row or {}).get("net_gex_mm")),
             "gravity": (gex_row or {}).get("gravity"),
+            "dp": dp_map,
+            "dp_net_mm": dp_net_mm,
+            "dp_accumulating": bool(dp_row.get("accumulating")) if dp_row else None,
         }
 
     bull = []
@@ -367,7 +417,7 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
         jlaw_row, flow_row, gex_row = j_idx.get(symbol), f_idx.get(symbol), g_idx.get(symbol)
         if not jlaw_row or jlaw_row.get("option_score") is None:
             continue
-        candidate = enrich(symbol, verdict, jlaw_row, flow_row, gex_row)
+        candidate = enrich(symbol, verdict, jlaw_row, flow_row, gex_row, dp_idx.get(symbol))
         if not candidate["spot"] or candidate["iv_rank"] < 15 or candidate["iv_rank"] > 85:
             continue
         score = 0.0
@@ -382,6 +432,7 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
         score += 1.5 if candidate["pw_pct"] is not None and 0.5 <= candidate["pw_pct"] <= 6 else 0
         score += 1 if 20 <= candidate["iv_rank"] <= 80 else 0
         score += 1 if candidate["earn_ok"] else 0
+        score += 1.5 if candidate["dp_accumulating"] is True else 0  # dark pool accumulation confirms
         gates = jlaw_row.get("gates") or {}
         score += 0.5 if gates.get("trend_ok") else 0
         score += 0.5 if gates.get("near_52w_high") else 0
@@ -394,25 +445,28 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
         if verdict.get("verdict") != "bearish" or verdict.get("earnings_block"):
             continue
         symbol = verdict["symbol"]
-        candidate = enrich(symbol, verdict, j_idx.get(symbol, {}), f_idx.get(symbol), g_idx.get(symbol))
+        candidate = enrich(symbol, verdict, j_idx.get(symbol, {}), f_idx.get(symbol), g_idx.get(symbol), dp_idx.get(symbol))
         if not candidate["spot"]:
             continue
         candidate["score"] = 0.0
         bear.append(candidate)
-    bear.sort(key=lambda item: -(item["bearish_z"] or -999))
+    # Rank bear side by bearish flow z, with dark-pool distribution as the tiebreak.
+    bear.sort(key=lambda item: (-(item["bearish_z"] or -999), 0 if item["dp_accumulating"] is False else 1))
     print(f"bull candidates: {len(bull)} bear candidates: {len(bear)}")
 
     out: list[str] = [f"# Option Trading Opportunities — {REPORT_DATE}", ""]
-    out.append(
+    data_line = (
         f"Data: flow_verdict_rows {VERDICT_DATE}, option_flow_symbol_signals {FLOW_DATE} (normalized), "
-        f"trade-jlaw-v2 {JLAW_DATE} (option layer), gex_snapshot >= {GEX_FROM}. "
-        "Chain quotes = latest session close; re-verify before entry."
+        f"trade-jlaw-v2 {JLAW_DATE} (option layer), gex_snapshot >= {GEX_FROM}"
     )
+    if DP_DATE:
+        data_line += f", darkpool_symbol_daily {DP_DATE}"
+    out.append(data_line + ". Chain quotes = latest session close; re-verify before entry.")
     out.append("")
     out.append("## Short puts (bullish side) — executable proposals")
     out.append("")
-    out.append("| symbol | spot | score | earn | expiry (DTE) | 30Δ contract | credit | Δ | ann% | 20Δ contract | credit | Δ | ann% |")
-    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    out.append("| symbol | spot | score | earn | expiry (DTE) | 30Δ contract | credit | Δ | ann% | 20Δ contract | credit | Δ | ann% | dark pool |")
+    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     published = 0
     spread_rows = []
     for candidate in [c for c in bull if c["earn_ok"]][:14]:
@@ -439,10 +493,17 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
             return f"{(p['bid'] + p['ask']) / 2 / p['strike'] / DTE[EXP_MAIN] * 365 * 100:.0f}%" if p else "—"
 
         osi = lambda strike: build_osi(candidate["symbol"], EXP_MAIN, "P", strike)
+
+        def dp_cell(c):
+            if c.get("dp_net_mm") is None:
+                return "—"
+            tag = "acc" if c.get("dp_accumulating") else "dist"
+            return f"{c['dp_net_mm']:+.1f}M {tag}"
+
         out.append(
             f"| {candidate['symbol']} | {spot:.2f} | {candidate['score']:.1f} | {candidate['earn'] or '—'} | "
             f"{EXP_MAIN} ({DTE[EXP_MAIN]}) | {osi(p30['strike']) if p30 else '—'} | {money(p30)} | {delta(p30)} | {ann(p30)} | "
-            f"{osi(p20['strike']) if p20 else '—'} | {money(p20)} | {delta(p20)} | {ann(p20)} |"
+            f"{osi(p20['strike']) if p20 else '—'} | {money(p20)} | {delta(p20)} | {ann(p20)} | {dp_cell(candidate)} |"
         )
         if p30 and long30:
             credit = (p30["bid"] + p30["ask"]) / 2 - (long30["bid"] + long30["ask"]) / 2
@@ -484,8 +545,8 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
     out.append("")
     out.append("## Bear call spreads — executable proposals")
     out.append("")
-    out.append("| symbol | spot | expiry (DTE) | 30Δ contract | credit | Δ | 20Δ contract | credit | Δ |")
-    out.append("|---|---|---|---|---|---|---|---|---|")
+    out.append("| symbol | spot | expiry (DTE) | 30Δ contract | credit | Δ | 20Δ contract | credit | Δ | dp net |")
+    out.append("|---|---|---|---|---|---|---|---|---|---|")
     for candidate in bear[:6]:
         try:
             spot, contracts = chain(cfg["UW_BASE"], cfg["UW_API_KEY"], candidate["symbol"], EXP_MAIN)
@@ -505,10 +566,11 @@ def run(cfg: dict, args: argparse.Namespace) -> int:
             return f"{p['delta']:.2f}" if p else "—"
 
         osi = lambda strike: build_osi(candidate["symbol"], EXP_MAIN, "C", strike)
+        dp_net_cell = f"{candidate['dp_net_mm']:+.1f}M" if candidate.get("dp_net_mm") is not None else "—"
         out.append(
             f"| {candidate['symbol']} | {spot:.2f} | {EXP_MAIN} ({DTE[EXP_MAIN]}) | "
             f"{osi(c30['strike']) if c30 else '—'} | {money(c30)} | {delta(c30)} | "
-            f"{osi(c20['strike']) if c20 else '—'} | {money(c20)} | {delta(c20)} |"
+            f"{osi(c20['strike']) if c20 else '—'} | {money(c20)} | {delta(c20)} | {dp_net_cell} |"
         )
         if c30 and long30 and not args.no_log:
             row = opportunity_row(candidate, "BEAR_CALL_SPREAD", c30, long30, spot)
