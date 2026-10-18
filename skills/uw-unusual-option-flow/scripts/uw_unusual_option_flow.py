@@ -29,7 +29,7 @@ from datetime import date, datetime, time as clock_time, timedelta, timezone
 from pathlib import Path
 from statistics import median
 from typing import Any, Iterable
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -42,7 +42,10 @@ DEFAULT_SIGNAL_TABLE = "option_flow_symbol_signals"
 DEFAULT_POSITION_ACTIONS_TABLE = "orats_position_actions_daily"
 DEFAULT_CATEGORIES = ("core", "satellite", "watch1")
 DEFAULT_CACHE_DIR = Path("uw_unusual_option_flow_cache")
-EASTERN = ZoneInfo("America/New_York")
+try:
+    EASTERN = ZoneInfo("America/New_York")
+except ZoneInfoNotFoundError:  # Windows Python without the optional tzdata package
+    EASTERN = timezone(timedelta(hours=-5))
 US_EXCHANGES = {
     "NASDAQ", "NASDAQGS", "NASDAQCM", "NASDAQGM", "NYSE", "NYSEARCA",
     "NYSE AMERICAN", "NYSE MKT", "AMEX", "ARCA", "BATS", "CBOE", "IEX",
@@ -1176,7 +1179,8 @@ def self_test() -> dict[str, Any]:
         checks += 1
         payload = signal_payload(result)
         assert set(payload) == {
-            "ticker", "signal_date", "current_price", "total_call_premium", "total_put_premium", "call_put_premium_ratio", "unusual_call_count", "unusual_put_count", "extreme_trade_count", "max_unusualness_score", "avg_unusualness_score", "bullish_flow_score", "bearish_flow_score", "hedging_flow_score", "net_option_flow_bias", "dominant_structure", "top_contracts", "option_flow_summary", "jlaw_source_row", "unusual_premium", "net_directional_premium", "directional_confidence", "bias_strength", "iv_rising_unusual_count"
+            "ticker", "signal_date", "current_price", "total_call_premium", "total_put_premium", "call_put_premium_ratio", "unusual_call_count", "unusual_put_count", "extreme_trade_count", "max_unusualness_score", "avg_unusualness_score", "bullish_flow_score", "bearish_flow_score", "hedging_flow_score", "net_option_flow_bias", "dominant_structure", "top_contracts", "option_flow_summary", "jlaw_source_row", "unusual_premium", "net_directional_premium", "directional_confidence", "bias_strength", "iv_rising_unusual_count",
+            "bullish_z", "bearish_z", "net_bias_z", "bullish_pct", "bearish_pct", "net_bias_pct",
         }
         checks += 1
     return {"ok": True, "self_test": "passed", "checks": checks, "model_version": MODEL_VERSION}
