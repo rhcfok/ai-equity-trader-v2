@@ -4,11 +4,13 @@ Read before changing the schema, the identity key, lifecycle states, or the win-
 
 ## Purpose
 
-The daily Davis-playbook workflow (UW-option-breakout verdicts + normalized option-flow signals + JLaw option layer + GEX + live chains) publishes opportunities every trading day. `public.option_opportunity` stores one row per published opportunity and later receives terminal outcomes so the workflow can be measured in **winning rate** per strategy and period.
+The daily Davis-playbook workflow (UW-option-breakout verdicts + normalized option-flow signals + JLaw option layer + GEX + live chains) publishes opportunities every trading day. `public."option-opportunity-davis"` stores one row per published opportunity and later receives terminal outcomes so the workflow can be measured in **winning rate** per strategy and period.
 
 ## Row identity and idempotency
 
-`opportunity_key = report_date | strategy | symbol | expiry | short_strike` (pipe-joined, uppercase symbol). The daily runner upserts with `Prefer: resolution=merge-duplicates,on_conflict=opportunity_key`, so re-running the same day merges instead of duplicating. Re-publishing a day refreshes the snapshot columns but must **never** clear a terminal `outcome` or `win`.
+`opportunity_key = report_date | strategy | symbol | expiry | short_strike` (pipe-joined, uppercase symbol). The daily runner merges explicitly — PATCH by `opportunity_key` first, INSERT only when no row matched — because PostgREST's `resolution=merge-duplicates,on_conflict=...` upsert is not honored on this table (identity PK `id` is `GENERATED ALWAYS` plus a separate unique constraint). Re-running the same day therefore merges instead of duplicating. Re-publishing a day refreshes the snapshot columns but must **never** clear a terminal `outcome` or `win`.
+
+Contract symbols: `short_option_symbol` / `long_option_symbol` are OCC-style (e.g., `CRM261120P00230000`): symbol + YYMMDD + C/P + strike×1000 zero-padded to 8.
 
 ## Strategies
 

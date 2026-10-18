@@ -1,10 +1,15 @@
 -- option_opportunity.sql
 -- Standard opportunity ledger for the daily Davis-playbook option workflow.
 --
--- One row per published opportunity per day, idempotently upserted by
+-- One row per published opportunity per day, idempotently merged by
 -- opportunity_key = report_date|strategy|symbol|expiry|short_strike.
 -- Conventions mirror public."csp-bps-opportunity" (same lifecycle intent:
 -- research ledger first, outcome tracker second).
+--
+-- Note on merges: PostgREST's merge-duplicates upsert does not honor
+-- on_conflict on this table (identity PK + unique constraint), so the daily
+-- runner merges explicitly with a PATCH-by-opportunity_key followed by an
+-- INSERT when no row matched. See references/option_opportunity_contract.md.
 --
 -- Status lifecycle: PROPOSED -> ACTIVE -> CLOSED (outcome filled) | ROLLED |
 -- ASSIGNED | SKIPPED. A day with zero qualifying setups logs one
@@ -17,7 +22,7 @@
 --
 -- Run once in the Supabase SQL editor. Idempotent.
 
-create table if not exists public.option_opportunity (
+create table if not exists public."option-opportunity-davis" (
     id                     bigint generated always as identity primary key,
     opportunity_key        text not null unique,             -- report_date|strategy|symbol|expiry|short_strike
     run_id                 text,
@@ -36,8 +41,10 @@ create table if not exists public.option_opportunity (
     short_strike           double precision,
     short_delta            double precision,
     short_oi               double precision,
+    short_option_symbol    text,                             -- OCC-style, e.g. CRM261120P00230000
     long_strike            double precision,                 -- null for SHORT_PUT
     long_delta             double precision,
+    long_option_symbol     text,                             -- null for SHORT_PUT
     spread_width           double precision,                 -- null for SHORT_PUT
     spot_price             double precision,
     quote_as_of            timestamptz,
@@ -108,13 +115,13 @@ create table if not exists public.option_opportunity (
 );
 
 create index if not exists option_opportunity_symbol_idx
-    on public.option_opportunity (symbol);
+    on public."option-opportunity-davis" (symbol);
 
 create index if not exists option_opportunity_report_date_idx
-    on public.option_opportunity (report_date);
+    on public."option-opportunity-davis" (report_date);
 
 create index if not exists option_opportunity_status_idx
-    on public.option_opportunity (status);
+    on public."option-opportunity-davis" (status);
 
 create index if not exists option_opportunity_winrate_idx
-    on public.option_opportunity (strategy, outcome, win);
+    on public."option-opportunity-davis" (strategy, outcome, win);
