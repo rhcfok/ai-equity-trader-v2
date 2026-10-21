@@ -55,8 +55,13 @@ Read `references/methodology.md` before changing routing gates, valuation tiers,
 
 ## Execution Workflow
 
-### Step 1: Ensure Supabase Table Exists
-Apply `sql/uw_option_opportunities.sql` once to create `public."uw-option-opportunities"` and its indexes.
+### Step 1: Supabase Destination Table (LIVE)
+The destination table `public."uw-option-opportunities"` **already exists** in the Supabase project `vmxxmdtzvwizrpjrrvnp` (migration `create_uw_option_opportunities` applied 2026-10-21): 100+ columns covering strategy metadata, short/leg2 option quotes, structure economics, UW fundamentals/IV/RSI, upstream JLaw/flow/GEX/dark-pool signals, the composite score, and the hypothetical lifecycle checkpoints.
+
+- **RLS is enabled** with no anon/authenticated policies; only the service-role key (as used by the runner) can read/write.
+- A `BEFORE UPDATE` trigger (`uw_opt_opp_updated_at_trg`) auto-touches `updated_at` on every PATCH.
+- Idempotent **upsert by `opportunity_key`** (`report_date|strategy|dte_bucket|symbol|short_expiry|short_strike|second_strike`): the runner first selects the existing row, preserves settled terminal fields (`status`, `outcome`, `win`, `profit50_hit_date`, `dte21_mark_date`, `exit_date`) when `outcome`/`win` are already set, then PATCHes; otherwise it POSTs a new row. Same-day re-runs and lifecycle passes are therefore merge-safe.
+- Re-create from scratch (fresh project only) with `sql/uw_option_opportunities.sql`, which matches the live schema including RLS and the trigger.
 
 ### Step 2: Run the Daily Stateless Scanner & Lifecycle Tracker
 ```bash

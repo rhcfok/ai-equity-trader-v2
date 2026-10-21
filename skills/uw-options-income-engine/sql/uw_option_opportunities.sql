@@ -179,3 +179,24 @@ create index if not exists uw_opt_opp_status_idx
 
 create index if not exists uw_opt_opp_winrate_idx
     on public."uw-option-opportunities" (strategy, dte_bucket, outcome, win);
+
+-- RLS enabled (service-role key writes; no anon/authenticated policies).
+-- NOTE: already applied to Supabase project vmxxmdtzvwizrpjrrvnp via migration
+-- `create_uw_option_opportunities` (2026-10-21).
+alter table public."uw-option-opportunities" enable row level security;
+
+-- Auto-touch updated_at on every PATCH (lifecycle pass and same-day re-runs).
+create or replace function public.uw_opt_opp_set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+    new.updated_at = now();
+    return new;
+end;
+$$;
+
+drop trigger if exists uw_opt_opp_updated_at_trg on public."uw-option-opportunities";
+create trigger uw_opt_opp_updated_at_trg
+    before update on public."uw-option-opportunities"
+    for each row execute function public.uw_opt_opp_set_updated_at();
