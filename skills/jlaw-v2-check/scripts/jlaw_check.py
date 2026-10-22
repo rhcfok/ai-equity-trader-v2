@@ -22,7 +22,7 @@ import argparse, json, os, sys, urllib.request, urllib.error, urllib.parse
 
 VALID_TYPES = {"yahoo", "chart"}
 LEGACY_TYPES = {"data": "yahoo"}  # mislabel seen 2026-10-09/10, normalize to yahoo
-CHART_CATEGORIES = ("core", "satellite", "watch1")
+CHART_CATEGORIES = ("core", "satellite", "watch1", "watch2", "watch3")
 # Watchlist symbols Yahoo Finance does not cover (non-US listings /
 # data limitations) — confirmed by owner 2026-10-10, excluded from the
 # yahoo coverage expectation instead of flagged on every run.

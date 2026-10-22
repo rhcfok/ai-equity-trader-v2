@@ -10,7 +10,7 @@ color: Blue
 This skill is the **visual pipeline** of the J Law workflow. It runs in
 parallel with `jlaw-v2-yahoo`: the yahoo pipeline screens the **entire**
 Supabase `watchlist` table from OHLCV data; this skill reviews **every
-ticker in `category` ∈ {core, satellite, watch1}** on the user's live
+ticker in `category` ∈ {core, satellite, watch1, watch2, watch3}** on the user's live
 TradingView charts — base quality, MA geometry, 200MA slope, live pivot
 behaviour, earnings flags — the things numbers do not capture well.
 
@@ -26,8 +26,8 @@ items are absolute.
 
 - This is an **independent pipeline**, not a sub-step of `jlaw-v2-yahoo`:
   it reviews **every ticker in the Supabase `watchlist` table whose
-  `category` is `core`, `satellite`, or `watch1`** (112 symbols as of
-  2026-10-08), fetched fresh each run. It does not wait for, or depend on,
+  `category` is `core`, `satellite`, `watch1`, `watch2`, or `watch3`**
+  (258 symbols as of 2026-10-22), fetched fresh each run. It does not wait for, or depend on,
   the yahoo pipeline's output.
 - Chart verdicts stand on their own as the visual review of record; when a
   yahoo row for the same symbol/date exists, chart findings may **downgrade**
@@ -73,14 +73,15 @@ unavailable or the user asks for the browser.
 0. **Pipeline context.** Two pipelines run in parallel over the Supabase
    `watchlist` table: `jlaw-v2-yahoo` screens the **entire** table from
    Yahoo data; **this skill** visually reviews the **`core` / `satellite` /
-   `watch1` subset** on TradingView. Both upsert to `trade-jlaw-v2`, told
+   `watch1` / `watch2` / `watch3` subsets** on TradingView. Both upsert to
+   `trade-jlaw-v2`, told
    apart by `jlaw_review_type` (`yahoo` vs `chart`).
 1. **Fetch the universe.** Pull the review list straight from Supabase
    (project `vmxxmdtzvwizrpjrrvnp`):
 
 ```sql
 select symbol, exchange from watchlist
-where category in ('core','satellite','watch1');
+where category in ('core','satellite','watch1','watch2','watch3');
 ```
 
    (`tv_capture.py --from-watchlist` does this automatically from

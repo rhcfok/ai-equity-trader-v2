@@ -23,7 +23,8 @@ default; the only write it can perform is label normalization
 
 1. **Coverage** — row counts per `run_date × jlaw_review_type`, compared
    against the `watchlist` table: yahoo rows should cover the **entire**
-   watchlist; chart rows should cover `category ∈ {core, satellite, watch1}`.
+   watchlist; chart rows should cover `category ∈ {core, satellite, watch1,
+   watch2, watch3}`.
    Missing symbols are listed (capped) so a partial run is caught.
 2. **Labels** — any `jlaw_review_type` outside `{yahoo, chart}`. `data`
    was a mislabel a runner used on 2026-10-09/10 (the owner confirmed

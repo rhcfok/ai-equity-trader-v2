@@ -59,8 +59,8 @@ candidates, this skill judges them the way J Law would.
 Unless the user names explicit tickers, this pipeline's screening universe
 is **every symbol in the Supabase `watchlist` table — all categories, no
 filter** (core, satellite, watch1, watch2+, hedges — everything). The
-sister pipeline `jlaw-v2-chart` covers only the core/satellite/watch1
-subset visually; this pipeline is the quantitative sweep of the full list.
+sister pipeline `jlaw-v2-chart` covers core/satellite/watch1/watch2/watch3
+visually; this pipeline is the quantitative sweep of the full list.
 
 Fetch symbols from Supabase (project `vmxxmdtzvwizrpjrrvnp`), e.g.:
 
@@ -163,7 +163,8 @@ Table schema (already created by migration `create_trade_jlaw_v2`):
 
 This pipeline and **`jlaw-v2-chart`** run **independently and in parallel**:
 this skill sweeps the entire `watchlist` quantitatively; `jlaw-v2-chart`
-visually reviews the `core` / `satellite` / `watch1` subset on TradingView.
+visually reviews the `core` / `satellite` / `watch1` / `watch2` / `watch3`
+subset on TradingView.
 Both upsert to `trade-jlaw-v2` under `unique (run_date, symbol,
 jlaw_review_type)` — rows are told apart by `jlaw_review_type`
 (`yahoo` vs `chart`) and never overwrite each other. Where both cover the

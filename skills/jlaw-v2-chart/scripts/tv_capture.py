@@ -8,7 +8,7 @@ Usage:
 
 Notes:
 - --from-watchlist pulls the chart pipeline's universe straight from the
-  Supabase `watchlist` table (category in core/satellite/watch1) using
+  Supabase `watchlist` table (category in core/satellite/watch1/watch2/watch3) using
   SUPABASE_URL / SUPABASE_KEY; the table's `exchange` column is used for
   the TradingView symbol URL. This is the standard full-run mode.
 - Exchange defaults to NYSE when unknown; most NASDAQ names are resolved
@@ -23,7 +23,7 @@ import argparse, json, os, sys, time, urllib.request
 DAEMON = "http://127.0.0.1:10086/command"
 SESSION = "jlaw-tv-chart"
 DEFAULT_LAYOUT = "hnR03PEX"  # user's customised "Kimi" layout
-WATCHLIST_CATEGORIES = ("core", "satellite", "watch1")
+WATCHLIST_CATEGORIES = ("core", "satellite", "watch1", "watch2", "watch3")
 
 EXCH_MAP = {  # extend as needed; default NYSE
     "NASDAQ": {"AAPL", "DUOL", "NXPI", "MU", "MRVL", "AMZN", "COHR", "LITE",
@@ -70,7 +70,7 @@ def from_checklist(path, min_score):
 
 def from_watchlist():
     """Fetch (symbol, exchange) for the chart pipeline's universe from
-    Supabase: watchlist rows whose category is core/satellite/watch1."""
+    Supabase: watchlist rows whose category is core/satellite/watch1/watch2/watch3."""
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     key = os.environ.get("SUPABASE_KEY", "")
     if not url or not key:
@@ -101,7 +101,7 @@ def main():
     ap.add_argument("--from-checklist", help="jlaw checklist JSON path")
     ap.add_argument("--from-watchlist", action="store_true",
                     help="full chart universe from Supabase watchlist "
-                         "(core/satellite/watch1)")
+                         "(core/satellite/watch1/watch2/watch3)")
     ap.add_argument("--min-score", type=int, default=10)
     ap.add_argument("--out", required=True)
     ap.add_argument("--layout", default=DEFAULT_LAYOUT)

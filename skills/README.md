@@ -6,7 +6,7 @@ only — no orders, no brokerage connection, no personalized financial advice.
 
 | | **jlaw-v2-yahoo** (quantitative) | **jlaw-v2-chart** (visual) |
 |---|---|---|
-| Universe | **Entire `watchlist` table** — all categories | `watchlist` where `category ∈ {core, satellite, watch1}` |
+| Universe | **Entire `watchlist` table** — all categories | `watchlist` where `category ∈ {core, satellite, watch1, watch2, watch3}` |
 | Engine | `jlaw-yahoo-runner` (Yahoo OHLCV) + `jlaw_checklist.py` gate evaluator | TradingView "Kimi" layout screenshots, read against the chart-review checklist |
 | Output | Score + doctrine gates → A+ / Valid / Watch / Skip | STRUCTURE / TRIGGER / STOP / ACTION per ticker |
 | Supabase | `trade-jlaw-v2` rows with `jlaw_review_type = "yahoo"` (**every** scored symbol, Skips included) | `trade-jlaw-v2` rows with `jlaw_review_type = "chart"` (**every** reviewed symbol, Skips included) |
@@ -52,7 +52,7 @@ JLAW_REGIME=Risk-On python3 skills/jlaw-v2-yahoo/scripts/jlaw_checklist.py scree
   --output out/jlaw_checklist_$(date -u +%F).json --write-supabase
 ```
 
-**Chart pipeline** — core/satellite/watch1 visual review:
+**Chart pipeline** — core/satellite/watch1/watch2/watch3 visual review:
 
 ```bash
 # 1. capture every chart in the universe (Route B shown; Route A is agent-driven)
