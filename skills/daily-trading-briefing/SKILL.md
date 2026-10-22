@@ -12,6 +12,7 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 - Supabase `trade-jlaw-v2`：当日 `yahoo` 行 + 最新 `chart` 行（chart 常滞后一天，属正常；10-10 起已修复 null/错位问题）。
 - **flow verdict**：从 Supabase 交接表 `"flow-verdicts"` 读取（由 agent B / UW-option-breakout 写入）。本机工作区的 `flow_verdicts_<date>.json` 只是本地缓存，不是权威来源。
 - 自行拉数可用 `UW-option-breakout/scripts/pull_jlaw.py`。
+- **市场脆弱度仪表盘 Market Fragility Dashboard**：`https://vincizh.github.io/market-fragility-dashboard/`（每日 ~07:19 UTC 更新，运行时可能读到前一日快照——引用页面上的 as-of 日期）。作为 Regime 段的跨检输入，见 Step 3。
 
 ### Step 0 — 签收 flow verdict（agent A 侧校验规则）
 
@@ -50,6 +51,13 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 - chart Valid 数骤降（如 3 → 1）→ 简报头部注明"进一步收紧"
 - yahoo 出 Valid 且 tide 偏多 → 正常仓位
 
+**市场脆弱度跨检（Market Fragility Dashboard，2026-10-22 起）**：用 WebFetch 拉取仪表盘，提取 LPI 合成（档位/ΔLPI 趋势/尾部风险倍数）、funding 共振腿（x/3、SOFR−IORB、reserves 及 reserves/GDP 分位、后备工具用量）、信用离散（HY OAS、CCC−BB 分位与 z 值）、利率极值（30Y、term premium 分位）、放大器堆栈（dealer gamma 正负、basis 代理、CTA 状态、去杠杆计数）。然后：
+
+- 在 Regime 段"解读 Read"行之前织入 **3–4 条中英双语要点**（LPI / funding / 信用与久期 / 放大器），引用页面 as-of 日期
+- "解读 Read"行尾追加一句与 tide 的交叉判读（如：脆弱度 ELEVATED 但 funding 未确认 → 谨慎不转向）
+- 与期权流 tide 方向相悖时（如 tide constructive 而 SPY verdict 翻 bearish）显式标注背离
+- 拉取失败则跳过该块并在简报中注明，不阻塞出报
+
 ### Step 4 — 分级
 
 | 级别 | 条件 | 处理 |
@@ -77,8 +85,8 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 
 **格式要求：中英双语**。章节标题双语（如 `## 2. A 级：三重确认 | Tier A: Triple-Confirmed`）；表格表头双语（`触发 Trigger`）；长段落中文一行、英文一行对照。
 
-1. 写 `briefing_<date>.md` 到工作区（覆盖当日旧版），结构：Regime → A 级（参数表）→ B 级（汇总表）→ 回避/冲突（含原因）→ 执行要点 → 数据来源
-2. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。用 notion-update-page 把整个简报包在一个 `<details>` 折叠块里；更新当日简报用 `replace_content` 整体替换，历史日期的折叠块保留不动
+1. 写 `briefing_<date>.md` 到工作区（覆盖当日旧版），结构：Regime（含脆弱度跨检块）→ A 级（参数表）→ B 级（汇总表）→ 回避/冲突（含原因）→ 执行要点 → 数据来源
+2. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。**2026-10-21 起解析器弃用 `<details>/<summary>`**（与 `<table>` 组合会被拒绝："bare <tr> is not valid"）——改用规范 `<toggle>` 语法：`<toggle>` 首行为标题（如 `📊 交易决策简报 <date> Trading Decision Briefing — ...`），随后空行，正文，`</toggle>`。当日重跑时用 `update_content` 定点替换**仅当日**的 toggle 内容（old_str 从当日 `notion-fetch` 原样复制；存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格；优先用无格式纯文本尾锚定位）；解析失败回退：先插最小探针 toggle，fetch 读其序列化形式再定点展开。历史日期的折叠块保留不动
 3. 回复用户给精简表格版 + 文件链接 + "研究分析非投资建议"
 
 ## 已知坑
@@ -89,6 +97,8 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 - Yahoo 无数据的非美股品种（AIR、AVEX 等）持续缺席属预期
 - 曾见数据源错价疑点（如 NOW 现价 140.86 异常），发现后在简报中标注
 - Notion 表格必须用 `<table>` 增强 Markdown 语法，不能用标准 markdown 表格
+- **Notion 解析器 2026-10-21 变更**：`<details>/<summary>` 已弃用（自动转 `<toggle>`），与 `<table>` 组合直接报错 "bare <tr> is not valid"；一律写 `<toggle>`（标题在首行 + 空行 + 正文）。页面存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格——update_content 的 old_str 须原样复制；优先用纯文本尾锚（句尾无格式片段）定位
+- 脆弱度仪表盘：LPI 为周度合成（滞后数日）、页面 ~07:19 UTC 更新，引用时带 as-of 日期；卡片偶见未来日期 quirk 与个别 stale 源，读数时计入
 
 ## 样例
 
