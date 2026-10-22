@@ -23,6 +23,11 @@ import argparse, json, os, sys, urllib.request, urllib.error, urllib.parse
 VALID_TYPES = {"yahoo", "chart"}
 LEGACY_TYPES = {"data": "yahoo"}  # mislabel seen 2026-10-09/10, normalize to yahoo
 CHART_CATEGORIES = ("core", "satellite", "watch1", "watch2", "watch3")
+# The chart pipeline widened to watch2/watch3 on 2026-10-23. Earlier runs
+# legitimately cover only the three original tiers, so coverage must be
+# judged against the universe that was in force on that date.
+LEGACY_CHART_CATEGORIES = ("core", "satellite", "watch1")
+CHART_WIDENED_FROM = "2026-10-23"
 # Watchlist symbols Yahoo Finance does not cover (non-US listings /
 # data limitations) — confirmed by owner 2026-10-10, excluded from the
 # yahoo coverage expectation instead of flagged on every run.
@@ -135,8 +140,9 @@ def audit(supa, table, wl_table, date, normalize):
     wl = supa.get(wl_table, {"select": "symbol,category"})
     wl_all = {w["symbol"] for w in wl if w.get("symbol")}
     excluded = sorted(wl_all & KNOWN_YAHOO_EXCLUSIONS)
+    chart_cats = CHART_CATEGORIES if date >= CHART_WIDENED_FROM else LEGACY_CHART_CATEGORIES
     wl_chart = {w["symbol"] for w in wl
-                if w.get("category") in CHART_CATEGORIES}
+                if w.get("category") in chart_cats}
 
     # ---- coverage ---------------------------------------------------------
     coverage = {}
