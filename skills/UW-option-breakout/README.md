@@ -10,6 +10,7 @@ A credential-free, three-stage pipeline that enriches `trade-jlaw-v2` rows with 
 |---|---|
 | `SKILL.md` | End-to-end operational workflow for all three stages. |
 | `scripts/fetch_unusual_whales_option_data.py` | Builds a connector request manifest from `trade-jlaw-v2`. |
+| `scripts/mcp_fetch_snapshots.py` | Hardened connector driver: calls the official UW MCP server over HTTP (`/api/mcp`, tool `get_ticker_ohlc_latest_or_date`) per manifest request and saves result envelopes; retries 429/timeouts/transport errors (TimeoutError, SSL URLError), resumes from cached snapshots. |
 | `scripts/transform_unusual_whales_option_data.py` | Converts connector-saved daily-state snapshots into validated `option_*` values. |
 | `scripts/report_trade_jlaw_v2_option_breakouts.py` | Creates Markdown/CSV reports and can patch only option fields with explicit `--apply`. |
 | `scripts/trade_jlaw_v2_option_contract.py` | Whitelisted 18-field update contract. |

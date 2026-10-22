@@ -14,8 +14,9 @@ description: 用 Unusual Whales 期权流对候选标的做第三重确认/否�
 
 ## 前置条件
 
-- Unusual Whales MCP 工具可用（`get_flow_alerts`、`get_market_tide`）。
+- Unusual Whales 数据可用。两条已验证通道：桌面 MCP 连接器，或直接调官方 MCP over HTTP（`https://api.unusualwhales.com/api/mcp`，JSON-RPC initialize + tools/call）与白名单 REST（`/api/option-trades/flow-alerts`、`/api/market/market-tide`、`/api/stock/{ticker}/earnings`），鉴权均为 `Authorization: Bearer $UW_API_KEY` + 头 `UW-CLIENT-API-ID: 100001`。key 取自仓库 `.env` 的 `UW_API_KEY`，绝不打印或落盘。 快照抓取参考实现：`scripts/mcp_fetch_snapshots.py`（含传输错误重试与缓存续传）。
 - Supabase 可访问 + `.env` 含小写 `supabase_url` / `supabase_service_role`（仅当需要自行拉 jlaw 候选时用 `scripts/pull_jlaw.py`）。
+- Python venv：uv 工具链可能缺失（其 trampoline 会失效报 "entity not found"）；重建用 `python -m venv .venv` + `pip install -r requirements.txt`（Python 3.12 实测可用）。
 
 ## 工作流
 
@@ -61,7 +62,7 @@ python scripts/pull_jlaw.py --out .
 
 ### Step 4 — regime 辅助信号
 
-`get_market_tide`（最近交易日；注意非交易日会报错，用上一交易日即可）：午后 net call premium 持续深度为负 = 防御 regime，写入输出的 `market_tide` 字段。
+`get_market_tide`（最近交易日；注意非交易日会报错，用上一交易日即可）：午后 net call premium 持续深度为负 = 防御 regime，写入输出的 `market_tide` 字段。判读只看 ET≥13:00 的 afternoon 桶；**若默认调用只返回盘前/半日桶（afternoon 桶为空或 0 个），当日会话未收盘或返回了重标签的部分日——改用显式 `?date=<上一交易日>` 重取完整会话（正常为 81 桶、09:30–16:10）再判读，不要拿半日数据出 bias**。
 
 ## 输出
 
@@ -98,11 +99,12 @@ python scripts/pull_jlaw.py --out .
 3. **完跑置位**：全部查完后 `status='complete'`，`rated_count` 定稿
 4. **全覆盖兜底**：`rated_count` 必须 = `candidates_total`（`no-data` verdict 计入 rated），才可置 `complete`；若仍有 `reason='uw_error'` 的 unrated，保持 `partial` 并按 5 分钟间隔重查
 5. REST upsert：POST `/flow-verdicts`，header 加 `Prefer: resolution=merge-duplicates`
-6. **归一化行同步（完跑必做）**：status 置 `complete` 前，执行 `python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_<date>.json`，把 `verdicts[]` 逐 symbol 解包并 upsert 到 `public.flow_verdict_rows`（PK `(verdict_date, symbol)`，重复执行自动合并、幂等）。表结构见 `sql/flow_verdict_rows.sql`——**首次使用前需在 Supabase SQL 编辑器执行一次该 DDL**。存量 blob 行可用 `python scripts/upsert_flow_verdict_rows.py --pull-from-supabase` 一次性回填（6 行历史 ≈ 1,100+ 条 symbol 行）。
+6. **归一化行同步（完跑必做）**：status 置 `complete` 前，执行 `python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_<date>.json`，把 `verdicts[]` 逐 symbol 解包并 upsert 到 `public.flow_verdict_rows`（PK `(verdict_date, symbol)`，重复执行自动合并、幂等）。表结构见 `sql/flow_verdict_rows.sql`——**首次使用前需在 Supabase SQL 编辑器执行一次该 DDL**。存量 blob 行可用 `python scripts/upsert_flow_verdict_rows.py --pull-from-supabase` 一次性回填（6 行历史 ≈ 1,100+ 条 symbol 行）。**upsert 后核对该日期行数 = `rated_count`，不一致不得报完跑**（2026-10-19→10-22 曾因漏跑本步导致归一化表停滞，下游 option-davis / uw-options-income-engine 读的是这张表）。
 
 ## 已知坑
 
 - UW 限流：逐只调用间保持 2–3s 间隔；429/超时按指数退避重试（最多 3 次）。**不要为省调用主动跳过候选——全覆盖是硬要求（2026-10-13 起，原 ≈20 次/日配额已废除）**。
+- **快照抓取的传输错误必须显式重试**：read 阶段的 `TimeoutError` 与 SSL `UNEXPECTED_EOF`（`URLError`）不会被 429/HTTP 状态码重试逻辑捕获——驱动需同时捕获这两类异常再退避（2026-10-16 实测两次中断均属此类，重跑即可从缓存续传）。
 - OI 变化需次日确认，vol/OI 高 ≠ 新开仓，描述时保持"unconfirmed"口径。
 - 远端深度虚值 call 的 bid 侧大单通常是卖出（备兑或看顶），不要当成看多证据。
-- 非交易日 `get_market_tide` 会报错，回退到上一个交易日。
+- 非交易日 `get_market_tide` 会报错，回退到上一个交易日；默认调用返回半日/重标签数据时用显式 `?date=` 重取（见 Step 4）。
