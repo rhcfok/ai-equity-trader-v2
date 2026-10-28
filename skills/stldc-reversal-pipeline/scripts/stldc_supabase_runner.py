@@ -135,7 +135,21 @@ def ladder(df: pd.DataFrame, ldc: pd.DataFrame, st: pd.DataFrame,
     close = df["close"]
     sma20, sma50 = ta.sma(close, 20), ta.sma(close, 50)
     rsi = ta.rsi(close, length=14)
-    macd = ta.ema(close, 12) - ta.ema(close, 26)
+    e12, e26 = ta.ema(close, 12), ta.ema(close, 26)
+    if sma20 is None or sma50 is None or rsi is None or e12 is None or e26 is None:
+        # listing younger than the shortest indicator - record coverage, no stage
+        spy_r = "WEAK" if bool(spy_weak.iloc[-1]) else ("BULL" if bool(spy_bull.iloc[-1]) else "MIXED")
+        return {
+            "stage": "NONE", "stage_date": None, "stage_ago": None,
+            "confirm_kind": None, "confirm_lead": None,
+            "score": 0, "score_structure": 0, "score_supertrend": 0, "score_ldc": 0,
+            "structure": None, "close": float(close.iloc[-1]),
+            "sma20": None, "sma50": None, "rsi14": None, "macd_hist": None,
+            "st_dir": None, "st_line": None,
+            "ldc_signal": "NEUT", "ldc_prediction": 0,
+            "spy_regime": spy_r, "ldc_short_tag": None, "ldc_long_tag": None,
+        }, []
+    macd = e12 - e26
     hist = macd - ta.ema(macd, 9)
     c = close.to_numpy(dtype=float)
     n = len(df)
@@ -249,6 +263,8 @@ def ladder_history(df: pd.DataFrame, ldc: pd.DataFrame, st: pd.DataFrame,
     sma20, sma50, sma200 = ta.sma(close, 20), ta.sma(close, 50), ta.sma(close, 200)
     if sma200 is None:  # pandas_ta returns None when history < length
         sma200 = pd.Series(np.nan, index=close.index)
+    if sma20 is None or sma50 is None:
+        return []  # listing younger than the shortest indicator
     rsi = ta.rsi(close, length=14)
     macd = ta.ema(close, 12) - ta.ema(close, 26)
     hist = macd - ta.ema(macd, 9)
@@ -471,7 +487,8 @@ def main() -> int:
     SUPABASE_URL, SUPABASE_KEY = load_creds()
 
     # ---- watchlist (shared table; no jlaw dependency) ----
-    wl = sb_get("watchlist?select=symbol,category&category=in.(core,satellite)&limit=1000")
+    wl = sb_get("watchlist?select=symbol,category"
+                "&category=in.(core,satellite,watch1,watch2,watch3)&limit=1000")
     cat_map = {r["symbol"]: r["category"] for r in wl}
     tickers = sorted(cat_map)
     log.info("Watchlist: %d tickers", len(tickers))

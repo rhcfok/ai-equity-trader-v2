@@ -1,6 +1,6 @@
 ---
 name: stldc-reversal-pipeline
-description: Daily reversal alert-and-confirmation pipeline for the core+satellite watchlist. Runs the Supertrend + Lorentzian Classification ladder (SMA20-loss / trend-break alerts, ST + LDC confirmations, SPY + paired-sector-ETF overlays) on closed daily bars and upserts state plus 2H entry-timing events to Supabase (trade-stldc-v2 / trade-stldc-v2-events). Standalone — no dependency on jlaw pipelines. Use for operating, re-running, debugging, or extending the daily reversal pipeline.
+description: Daily reversal alert-and-confirmation pipeline covering ALL watchlist tiers (core, satellite, watch1-3). Runs the Supertrend + Lorentzian Classification ladder (SMA20-loss / trend-break alerts, ST + LDC confirmations, SPY + paired-sector-ETF overlays) on closed daily bars and upserts state plus 2H entry-timing events to Supabase (trade-stldc-v2 / trade-stldc-v2-events). Standalone — no dependency on jlaw pipelines. Use for operating, re-running, debugging, or extending the daily reversal pipeline.
 icon: radar
 color: Blue
 ---
@@ -9,7 +9,10 @@ color: Blue
 
 Purpose: **alert and confirm trend reversals** (bull → bear and bear → bull) on
 the daily chart — not an entry system. Every stage has measured precision from
-a 5-year validation across the watchlist (numbers below).
+a 5-year validation across the watchlist (numbers below). Universe: **all
+watchlist tiers** — core, satellite, watch1, watch2, watch3 (~257 symbols;
+recent listings younger than the shortest indicator are recorded as
+`stage = NONE` for coverage).
 
 Research tooling only. No orders, no brokerage connection, no personalized
 financial advice.
@@ -48,7 +51,7 @@ standalone edge; the edge is in the alert→confirm ladder and the MA structure.
 ## Chain
 
 ```
-Supabase watchlist (core+satellite)
+Supabase watchlist (core, satellite, watch1-3)
         │
         ▼
 scripts/stldc_supabase_runner.py
