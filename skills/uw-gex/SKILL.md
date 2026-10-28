@@ -21,8 +21,8 @@ The API key is sent only in `Authorization: Bearer` calls to `https://api.unusua
 |---|---|
 | `SNAPSHOT_TABLE` | `gex_snapshot` |
 | `SUPABASE_WATCHLIST_TABLE` | `watchlist` |
-| `UW_WATCHLIST_CATEGORIES` | `core,satellite,watch1` |
-| `UW_MAX_WATCHLIST_SYMBOLS` | `200` |
+| `UW_WATCHLIST_CATEGORIES` | `core,satellite,watch1,watch2,watch3` |
+| `UW_MAX_WATCHLIST_SYMBOLS` | `400` |
 | `BRIEFING_SYMBOLS` | empty; optional explicit symbol override for a one-off run |
 | `UW_BASE` | `https://api.unusualwhales.com` |
 | `UW_DTE_FILTER` | `0,30` |
@@ -37,7 +37,7 @@ The API key is sent only in `Authorization: Bearer` calls to `https://api.unusua
 
 ## Procedure
 
-1. Confirm the three required secrets are bound. The default universe is read from `public.watchlist`, with categories `core`, `satellite`, and `watch1` in that order.
+1. Confirm the three required secrets are bound. The default universe is read from `public.watchlist`, with categories `core`, `satellite`, `watch1`, `watch2`, and `watch3` in that order.
 2. Optionally run with `DRY_RUN=true` to validate source access and GEX math without inserting snapshots.
 3. Run:
 

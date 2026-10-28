@@ -31,7 +31,8 @@ class UnusualWhalesGexRunnerTests(unittest.TestCase):
 
     def test_default_watchlist_configuration(self):
         self.assertEqual(runner.EXPLICIT_SYMBOLS, [])
-        self.assertEqual(runner.WATCHLIST_CATEGORIES, ("core", "satellite", "watch1"))
+        self.assertEqual(runner.WATCHLIST_CATEGORIES, ("core", "satellite", "watch1", "watch2", "watch3"))
+        self.assertEqual(runner.MAX_WATCHLIST_SYMBOLS, 400)
 
     def test_prepare_watchlist_symbols_orders_filters_and_deduplicates(self):
         rows = [
@@ -56,7 +57,7 @@ class UnusualWhalesGexRunnerTests(unittest.TestCase):
              patch.object(runner.urllib.request, "urlopen", return_value=response) as mocked_open:
             self.assertEqual(runner.load_watchlist_symbols(), [{"symbol": "AAPL", "category": "core"}])
         request = mocked_open.call_args.args[0]
-        self.assertIn("category=in.%28core%2Csatellite%2Cwatch1%29", request.full_url)
+        self.assertIn("category=in.%28core%2Csatellite%2Cwatch1%2Cwatch2%2Cwatch3%29", request.full_url)
         self.assertIn("select=id%2Csymbol%2Cexchange%2Ccategory", request.full_url)
 
     def test_uw_get_retries_incomplete_response(self):
