@@ -57,10 +57,10 @@ SNAPSHOT_TABLE = env("SNAPSHOT_TABLE", "gex_snapshot")
 WATCHLIST_TABLE = env("SUPABASE_WATCHLIST_TABLE", "watchlist")
 WATCHLIST_CATEGORIES = tuple(
     item.strip().lower()
-    for item in env("UW_WATCHLIST_CATEGORIES", "core,satellite,watch1").split(",")
+    for item in env("UW_WATCHLIST_CATEGORIES", "core,satellite,watch1,watch2,watch3").split(",")
     if item.strip()
 )
-MAX_WATCHLIST_SYMBOLS = int(env("UW_MAX_WATCHLIST_SYMBOLS", "200"))
+MAX_WATCHLIST_SYMBOLS = int(env("UW_MAX_WATCHLIST_SYMBOLS", "400"))
 EXPLICIT_SYMBOLS = [
     item.strip().upper()
     for item in env("BRIEFING_SYMBOLS").split(",")

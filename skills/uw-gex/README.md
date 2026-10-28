@@ -11,7 +11,7 @@ Unusual Whales–backed unsigned gamma-exposure (GEX) workflow.
 
 ## Defaults
 
-The runner selects explicitly US-listed symbols from `public.watchlist`, ordering categories as `core`, `satellite`, then `watch1`, and deduplicating symbols. `BRIEFING_SYMBOLS` is reserved for an intentional one-off override.
+The runner selects explicitly US-listed symbols from `public.watchlist`, ordering categories as `core`, `satellite`, `watch1`, `watch2`, then `watch3`, and deduplicating symbols. `BRIEFING_SYMBOLS` is reserved for an intentional one-off override.
 
 ## Validation
 
