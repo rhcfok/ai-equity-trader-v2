@@ -103,3 +103,32 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 ## 样例
 
 - `briefing_2026-10-10.md`（工作区）— 首份按本 skill 产出的双语简报（含 10-10 chart 更新版）
+
+---
+
+## Part 3 · 期权收入计划 | OPTIONS INCOME PLAN（v4 收入规则 income rules，2026-10-28 用户确认生效 / effective next run）
+
+> 本节为 Part 3 收入计划的权威规则（source of truth）；cron 提示词引用本节。*This section is the source of truth for the income plan; the cron prompt references it.*
+
+- **目标 Target**：**$20-30k/月 ≈ $7-8k/周 credit**（70-80% 来自 credit）。达成路径：①裸 put 账本修复释放保证金；②BPS/BCS 定义风险乘数；③11-20/12-18 月度 IV 溢价层；④CC 存量收益（另列，见硬规则 2）。*Path: repair the naked-put book, defined-risk multi-leg scaling, monthly IV layers; CC income tracked separately.*
+
+### 3.0-A DTE 规则 | DTE rules
+- **CSP / short call / strangle：DTE ≤ 20 天**。
+- **Credit Spread（BPS/BCS）：DTE < 35 天**（月度 IV 溢价可用 / monthly IV premium allowed）。
+- 月度到期（11-20/12-18 型）仅用于 spread / diagonal 空腿；短腿到期清标的财报 ≥2 天；**FOMC / 巨头发报夜不加新裸 gamma**（BPS/BCS 定义风险可做）。
+- 超限例外（>20 DTE 的 CSP/strangle）：三重背书（技术 + dp 干净/吸筹 + GEX put wall 在 strike 上方）**加 Rijnberk 估值锚（CSP strike ≤ equity_valuation 的 buy_below / fair_value）**。*Exceptions need triple backing plus the Rijnberk valuation anchor.*
+
+### 3.0-B 提案板 | Proposal board（每周 20 张合约 20 contracts/week）
+- 每周提案 **20 张合约**；**同一标的同时最多 2 张（same ticker ≤2）**；20 张合计 credit **≈ $7-8k/周**。
+- 来源叠加 source stack：option-davis / csp-bps (manus) / uw-option-opportunities 板 + **Tier B 方向确认提案**（Part 1' chart+flow 确认标的）+ **估值锚 CSP（Rijnberk `equity_valuation` × GEX put wall；CSP strike ≤ buy_below / fair_value）**。
+- **每张合约必须携带：置信度 Confidence（高 High / 中 Medium / 低 Low）+ 一行理由 rationale**。评级 rubric：
+  - **高 High**：verdict bullish/确认 ≥2 日 + dp 干净或吸筹 + 板排名靠前或估值锚；
+  - **中 Medium**：单日确认 / mixed 但 dp 支持 / alerts 5-20；
+  - **低 Low**：样本 <5 alerts、贴线门槛、疑似数据（RRR 0 / stop <1%）→ **Low 为可跳过 optional/skippable**。
+- **硬规则 Hard rules**：① 同一标的 ≤2 张；② **现有持仓的 covered call 不入提案**（持仓管理收益，另列 tracked separately）；③ dp 重度派发（buy%<25 且 net<−$100M）否决做多与卖 put；④ FOMC / 发报夜不加裸 gamma；⑤ 防御 regime 下 short strangle 否决（只做指数 iron condor）；⑥ 疑似数据行（RRR 0 / stop <1%）不挂单。
+
+### Post-print re-strike queue（财报后重设 strike 队列）
+每次财报后：dp 复核 → CSP/BPS 按 post-print GEX wall 与 Rijnberk 估值锚重设 strike；dp 派发名单维持否决；verdict 翻转的名单先进观察再恢复。*After each print: dp re-check → re-strike anchored to post-print GEX wall and valuation; distribution names stay vetoed; flipped verdicts re-enter via watch.*
+
+### 周度预算与节奏 | Weekly budget & cadence
+20 张合约合计 **≈ $7-8k/周 credit**；月度 ≈ **$20-30k**（含 11-20/12-18 月度 IV 层与滚仓 credit）。节奏：周一建板（核对 marks）→ 周中事件前停手 → 周四按决议/发报刷新加层 → 周五到期/滚仓。防守：2x credit 或短腿 touch 即撤；21 DTE / 2x credit 管存量；任一失效触发（tide 连续深流出 / NDX 破 55DMA×3 / SOXX 破 500×2 / LPI>60）→ 停新开仓。*Build Monday → stand down before events → layer Thursday → expire/roll Friday; defense rules as listed.*
