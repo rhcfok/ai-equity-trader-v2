@@ -1,6 +1,6 @@
 ---
 name: daily-trading-briefing
-description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase trade-jlaw-v2）与 UW-option-breakout 的 flow verdict，产出中英双语交易决策简报（Regime 判定 + A/B 级候选 + 触发价/止损/目标 + 回避名单），写入本地 md 并同步 Notion。触发：每日简报 / 盘前决策 / daily briefing / 交易决策简报 / 更新简报。
+description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_score.py）并整合 J Law 双管线（chart + yahoo，Supabase trade-jlaw-v2）与 UW-option-breakout 的 flow verdict，产出中英双语交易决策简报（Regime 判定 + A/B 级候选 + 触发价/止损/目标 + 回避名单），写入本地 md 并同步 Notion。触发：每日简报 / 盘前决策 / daily briefing / 交易决策简报 / 更新简报。
 ---
 
 # daily-trading-briefing：每日交易决策简报
@@ -9,6 +9,7 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 
 ## 输入与上游依赖
 
+- Supabase `trade-stldc-v2`（广度支柱）、`public.market_regime_daily`（regime 输出，见 Step 3）。
 - Supabase `trade-jlaw-v2`：当日 `yahoo` 行 + 最新 `chart` 行（chart 常滞后一天，属正常；10-10 起已修复 null/错位问题）。
 - **flow verdict**：从 Supabase 交接表 `"flow-verdicts"` 读取（由 agent B / UW-option-breakout 写入）。本机工作区的 `flow_verdicts_<date>.json` 只是本地缓存，不是权威来源。
 - 自行拉数可用 `UW-option-breakout/scripts/pull_jlaw.py`。
@@ -45,25 +46,61 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 - `mixed` / `no-data` → 中性，不加分不否决
 - `earnings_block: true`（财报 < 2 周）→ **不建仓**（BAC 案例）；财报 2–4 周 → 注明"财报前减仓/收紧止损"
 
-### Step 3 — Regime 判定
+### Step 3 — Regime 判定（确定性评分 Deterministic score，2026-10-29 起）
 
-- yahoo 零 Valid + market tide 防御 → **谨慎做多**，正常仓位减半
-- chart Valid 数骤降（如 3 → 1）→ 简报头部注明"进一步收紧"
-- yahoo 出 Valid 且 tide 偏多 → 正常仓位
+Regime 不再靠文字判断，由 `scripts/regime_score.py` 输出 **0–100 综合分 + 档位 + 固定执行规则**。简报只解读分数，不得另起结论。
 
-**市场脆弱度跨检（Market Fragility Dashboard，2026-10-22 起）**：用 WebFetch 拉取仪表盘，提取 LPI 合成（档位/ΔLPI 趋势/尾部风险倍数）、funding 共振腿（x/3、SOFR−IORB、reserves 及 reserves/GDP 分位、后备工具用量）、信用离散（HY OAS、CCC−BB 分位与 z 值）、利率极值（30Y、term premium 分位）、放大器堆栈（dealer gamma 正负、basis 代理、CTA 状态、去杠杆计数）。然后：
+**3a. 先读脆弱度仪表盘**（WebFetch `https://vincizh.github.io/market-fragility-dashboard/`）：提取 LPI 档位（LOW / NORMAL / ELEVATED / HIGH / CRITICAL）、funding 共振腿 x/3、as-of 日期。拉取失败 → 不传参数，stress 支柱记为缺失（权重自动重分配），简报注明。
 
-- 在 Regime 段"解读 Read"行之前织入 **3–4 条中英双语要点**（LPI / funding / 信用与久期 / 放大器），引用页面 as-of 日期
-- "解读 Read"行尾追加一句与 tide 的交叉判读（如：脆弱度 ELEVATED 但 funding 未确认 → 谨慎不转向）
-- 与期权流 tide 方向相悖时（如 tide constructive 而 SPY verdict 翻 bearish）显式标注背离
-- 拉取失败则跳过该块并在简报中注明，不阻塞出报
+**3b. 运行评分**
+
+```bash
+python skills/daily-trading-briefing/scripts/regime_score.py \
+  --date <date> --fragility-tier <LPI 档位> --funding-legs <x> --fragility-as-of <as-of> \
+  --out . --write-supabase
+```
+
+产出 `regime_<date>.json`（完整明细）、`regime_<date>.md`（双语 Regime 段，Notion `<table>` 语法，可直接粘贴）、Supabase `public.market_regime_daily` 一行（下游期权收入引擎读取 band/playbook）。
+
+**五个支柱 Five pillars**
+
+| 支柱 | 权重 | 输入 |
+|---|---:|---|
+| 趋势 Trend | 30% | SPY/QQQ 对 SMA50/SMA200、SMA50 斜率；SPY 三态 Markov（Bull/Sideways/Bear，按 20 日波动标准化收益打标，无前视）下一交易日概率 |
+| 波动率 Vol | 25% | VIX 水平、VIX/VIX3M 期限结构、VIX 一年分位、VRP（VIX − SPY 20 日实现波动） |
+| 广度 Breadth | 20% | `trade-stldc-v2` BULL vs BEAR confirm/alert 比例；`trade-jlaw-v2` chart（Valid+Watch）占比相对自身历史分位；chart+yahoo Valid 数 |
+| 期权流 Flow | 15% | `"flow-verdicts".payload.market_tide` **5 日均值** + 正值天数（不再用单日 tide 定调） |
+| 脆弱度 Stress | 10% | 仪表盘 LPI 档位 − 每条已确认 funding 腿 10 分 |
+
+**档位与执行规则 Bands → playbook（固定映射）**
+
+| 分数 | 档位 | A 级仓位 | B 级仓位 | 允许的收入策略 | 裸卖 CSP | CSP DTE 上限 | 信用风险预算 |
+|---|---|---:|---:|---|---|---:|---:|
+| ≥ 70 | RISK_ON 进攻 | ×1.0 | ×1.0 | 全部 | 全类别 | 45d | 3.0% NLV |
+| 55–70 | CONSTRUCTIVE 建设性 | ×1.0 | ×0.75 | CSP / BPS / Diagonal / CC | core + satellite | 39d | 2.5% |
+| 45–55 | NEUTRAL 中性 | ×0.6 | ×0.5 | CSP / BPS / CC / BCS | 仅 core | 30d | 2.0% |
+| 30–45 | CAUTIOUS 谨慎 | ×0.5 | 0 | BPS / CC / BCS（仅定义风险） | 不新开 | 21d | 1.25% |
+| < 30 | DEFENSIVE 防守 | ×0.25 | 0 | CC / BCS | 不新开 | 14d | 0.5% |
+
+**迟滞 Hysteresis**：脚本同时计算前两个交易日的分数。档位变化需连续两日确认，或当日分数越过边界 > 3 分；否则维持前一档位，并标注 `pending A→B`。简报头部写生效档位，括号内写原始档位。
+
+**背离 Divergences**（脚本自动检测，必须写进简报）：趋势强但广度弱（窄幅领涨）、广度改善但趋势弱、期权流追多但波动率承压、tide 防御与上升趋势背离、脆弱度高但 VIX 平静、当日 tide 与 5 日均值反向、Markov 状态与 STLDC SPY regime 不一致。
+
+**3c. 写入简报 Regime 段**
+
+1. 粘贴 `regime_<date>.md`（标题行含分数与档位）
+2. 其后保留 **3–4 条脆弱度双语要点**（LPI / funding / 信用与久期 / 放大器，引用 as-of 日期）——作为 stress 支柱的证据说明，不另行定调
+3. "解读 Read"一行：只解释**哪个支柱拖分/加分**与背离，不得与档位相矛盾（例：56 分 CONSTRUCTIVE 待确认 → 维持 NEUTRAL 规则，因广度 31 拖累）
+4. 与上一份简报对比分数变化（如 53 → 56 ⬆️）
+
+**禁止 Do not**：用"零 Valid"单独下结论（它只是广度支柱的一项）；用单日 tide 改变档位；引用 `gex_snapshot` 的 SPY/QQQ 墙位作 regime 证据（当前墙位贴近现价、`zero_gamma` 为空，仅反映近月仓位）。
 
 ### Step 4 — 分级
 
 | 级别 | 条件 | 处理 |
 |---|---|---|
-| **A 级** | chart Valid + flow bullish + earnings ≥ 2 周 | buy-stop，全额（regime 谨慎时减半） |
-| **B 级** | chart 高分 Watch（≥12）+ flow 不反对 + earnings 安全 | buy-stop 等触发；止损 >10% 减半仓；RRR < 0.5 标注"可跳过" |
+| **A 级** | chart Valid + flow bullish + earnings ≥ 2 周 | buy-stop，仓位 × playbook `size_mult` |
+| **B 级** | chart 高分 Watch（≥12）+ flow 不反对 + earnings 安全 | buy-stop 等触发；仓位 × playbook `tier_b_size_mult`（为 0 则只观察）；止损 >10% 再减半；RRR < 0.5 标注"可跳过" |
 | **回避** | flow bearish / earnings_block / 硬冲突 | 不做多，注明原因 |
 
 **每个 A/B 级标的必须给出**：
@@ -79,13 +116,13 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 2. 止损即纪律，不摊平
 3. 财报前一日减仓一半或收紧至成本
 4. 标注数据时效（chart/yahoo 各自 run_date）
-5. 失效条件：tide 连续两日深度 call 净流出或 SPY 破关键均线 → 全部降一档
+5. 失效条件：regime 生效档位下调一档 → 全部候选降一档；SPY 跌破 SMA50 当日即在简报头部预警（趋势支柱会在次日反映）
 
 ### Step 5 — 双语产出 + 同步
 
 **格式要求：中英双语**。章节标题双语（如 `## 2. A 级：三重确认 | Tier A: Triple-Confirmed`）；表格表头双语（`触发 Trigger`）；长段落中文一行、英文一行对照。
 
-1. 写 `briefing_<date>.md` 到工作区（覆盖当日旧版），结构：Regime（含脆弱度跨检块）→ A 级（参数表）→ B 级（汇总表）→ 回避/冲突（含原因）→ 执行要点 → 数据来源
+1. 写 `briefing_<date>.md` 到工作区（覆盖当日旧版），结构：Regime（`regime_<date>.md` + 脆弱度要点）→ A 级（参数表）→ B 级（汇总表）→ 回避/冲突（含原因）→ 执行要点 → 数据来源
 2. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。**2026-10-21 起解析器弃用 `<details>/<summary>`**（与 `<table>` 组合会被拒绝："bare <tr> is not valid"）——改用规范 `<toggle>` 语法：`<toggle>` 首行为标题（如 `📊 交易决策简报 <date> Trading Decision Briefing — ...`），随后空行，正文，`</toggle>`。当日重跑时用 `update_content` 定点替换**仅当日**的 toggle 内容（old_str 从当日 `notion-fetch` 原样复制；存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格；优先用无格式纯文本尾锚定位）；解析失败回退：先插最小探针 toggle，fetch 读其序列化形式再定点展开。历史日期的折叠块保留不动
 3. 回复用户给精简表格版 + 文件链接 + "研究分析非投资建议"
 
@@ -98,6 +135,8 @@ description: 每个交易日整合 J Law 双管线（chart + yahoo，Supabase tr
 - 曾见数据源错价疑点（如 NOW 现价 140.86 异常），发现后在简报中标注
 - Notion 表格必须用 `<table>` 增强 Markdown 语法，不能用标准 markdown 表格
 - **Notion 解析器 2026-10-21 变更**：`<details>/<summary>` 已弃用（自动转 `<toggle>`），与 `<table>` 组合直接报错 "bare <tr> is not valid"；一律写 `<toggle>`（标题在首行 + 空行 + 正文）。页面存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格——update_content 的 old_str 须原样复制；优先用纯文本尾锚（句尾无格式片段）定位
+- `regime_score.py` 依赖 Yahoo chart API（与 jlaw-yahoo-runner 相同），偶发 429 会自动重试；SPY 未出当日收盘时按 SPY 日期对齐（VIX 当日值不会被提前使用）
+- `trade-stldc-v2` 2026-10-27 起覆盖从 67 扩至 257 只，比例类指标不受影响，但跨期比较绝对数无意义
 - 脆弱度仪表盘：LPI 为周度合成（滞后数日）、页面 ~07:19 UTC 更新，引用时带 as-of 日期；卡片偶见未来日期 quirk 与个别 stale 源，读数时计入
 
 ## 样例

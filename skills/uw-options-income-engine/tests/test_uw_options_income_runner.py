@@ -572,6 +572,100 @@ def test_main_queries_watchlist_with_server_side_category_filter():
     assert r.WATCHLIST_CATEGORIES == ("core", "satellite", "watch1")
 
 
+# ---------------------------------------------------------------------------
+# Combined unusual-flow score
+# ---------------------------------------------------------------------------
+
+
+def _sig(d, net_mm, unu_mm, dc):
+    return {"signal_date": d, "net_directional_premium": net_mm * 1e6, "unusual_premium": unu_mm * 1e6, "directional_confidence": dc}
+
+
+def test_premium_tilt_is_per_ticker_and_bounded():
+    assert r._premium_tilt(_sig("2026-10-28", 447.6, 520.3, 0.74)) == pytest.approx(0.74, abs=1e-3)
+    assert r._premium_tilt(_sig("2026-10-28", -103.8, 112.5, 0.53)) == pytest.approx(-0.53, abs=1e-3)
+    small = r._premium_tilt(_sig("2026-10-28", 5.2, 5.05, 1.0))
+    assert 0.3 <= small < 0.4  # $5M strong-but-small print is down-weighted
+    assert r._premium_tilt(_sig("2026-10-28", 3.5, 1.5, 0.0)) == 0.0  # failed evidence gate
+
+
+def test_flow_composite_flags_mu_style_verdict_conflict():
+    # 2026-10-28 MU: verdict bearish (20 alerts) but +$448M bullish unusual premium
+    b = base_bundle(verdict="bearish", flow_alert_count=20, dp_total_premium_mm=180.7, dp_net_mm=-5.1)
+    b.flow_history = [_sig("2026-10-28", 447.6, 520.3, 0.74), _sig("2026-10-27", 97.1, 198.9, 0.39), _sig("2026-10-26", 104.2, 240.8, 0.37)]
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert "verdict_vs_premium" in b.flow_conflicts
+    assert b.flow_label == "neutral"
+    assert -15 < b.flow_composite < 15
+
+
+def test_flow_composite_flags_darkpool_conflict_meta_style():
+    b = base_bundle(verdict="bullish", flow_alert_count=20, dp_total_premium_mm=3013.2, dp_net_mm=-2847.6)
+    b.flow_history = [_sig("2026-10-28", -103.8, 112.5, 0.53)]
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert "darkpool_vs_options" in b.flow_conflicts or "verdict_vs_premium" in b.flow_conflicts
+    assert b.flow_label in {"neutral", "bear"}
+
+
+def test_flow_composite_strong_bull_when_all_agree():
+    b = base_bundle(verdict="bullish", flow_alert_count=20, dp_total_premium_mm=768.3, dp_net_mm=401.8)
+    b.flow_history = [_sig("2026-10-28", 49.9, 42.0, 0.9), _sig("2026-10-27", 38.1, 59.4, 0.61), _sig("2026-10-26", -12.1, 20.3, 0.35)]
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert b.flow_label == "strong_bull"
+    assert not b.flow_conflicts
+
+
+def test_flow_composite_ignores_stale_signals_and_reweights():
+    b = base_bundle(verdict="bullish", flow_alert_count=10, dp_total_premium_mm=0.0, dp_net_mm=None)
+    b.flow_history = [_sig("2026-10-13", -300, 400, 0.9)]
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert "premium_today" in b.flow_components["missing"]
+    assert b.flow_composite == pytest.approx(100.0, abs=0.1)  # only the verdict leg remains
+
+
+def test_darkpool_alone_cannot_set_label():
+    b = base_bundle(verdict="no-data", dp_total_premium_mm=500.0, dp_net_mm=-500.0)
+    b.flow_history = []
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert b.flow_label == "neutral"
+    assert abs(b.flow_composite) <= 15.0
+
+
+def test_strong_bearish_flow_vetoes_short_put_structures():
+    b = base_bundle()
+    b.flow_alert_count = 20
+    b.verdict = "mixed"
+    b.dp_total_premium_mm, b.dp_net_mm = 500.0, -480.0
+    b.flow_history = [_sig(TODAY.isoformat(), -400, 450, 0.9), _sig("2026-10-16", -300, 400, 0.8), _sig("2026-10-15", -200, 300, 0.7)]
+    r.compute_flow_composite(b, TODAY)
+    assert b.flow_composite <= -r.FLOW_STRONG
+    chain = [q("ABC", EXP_32, "P", 93.0, 1.85, 1.95, -0.24)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    assert not [x for x in rows if x["strategy"] in {"WHEEL_CSP", "BULL_PUT_SPREAD"}]
+
+
+def test_flow_points_follow_strategy_direction():
+    assert r.flow_alignment("WHEEL_CSP", 60) == pytest.approx(0.6)
+    assert r.flow_alignment("BEAR_CALL_SPREAD", 60) == pytest.approx(-0.6)
+    assert r.flow_alignment("SHORT_STRANGLE", 0) == pytest.approx(1.0)
+    assert r.flow_alignment("SHORT_STRANGLE", 50) == pytest.approx(-1.0)
+
+
+def test_rows_carry_flow_fields_and_conflict_caution():
+    b = base_bundle(verdict="bullish", flow_alert_count=20)
+    b.flow_history = [_sig(TODAY.isoformat(), -60, 80, 0.8)]
+    r.compute_flow_composite(b, TODAY)
+    chain = [q("ABC", EXP_32, "P", 93.0, 1.85, 1.95, -0.24)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    assert rows, "expected at least one candidate"
+    row = rows[0]
+    for k in ("flow_composite", "flow_label", "flow_conflicts", "flow_components", "flow_alert_count"):
+        assert k in row
+    assert "FLOW_CONFLICT_VERDICT_VS_PREMIUM" in (row["caution"] or "")
+    md = r.render_markdown_report(TODAY, rows, [])
+    assert "Flow Conflicts" in md
+
+
 class RunnerTestSuite(unittest.TestCase):
     pass
 
