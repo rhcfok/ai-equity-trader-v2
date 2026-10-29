@@ -102,6 +102,12 @@ class SymbolSignalBundle:
     bearish_z: float | None = None
     net_bias_z: float | None = None
     flow_alert_count: int | None = None
+    verdict_date: str | None = None
+    verdict_stale: bool = False
+    # Uncapped premium-weighted alert stats (UW-option-breakout/scripts/flow_alert_stats.py)
+    alert_count_total: int | None = None
+    alert_premium_tilt: float | None = None
+    verdict_quant: str | None = None
     # Recent option_flow_symbol_signals rows for this ticker (newest first):
     # [{"signal_date", "net_directional_premium", "unusual_premium", "directional_confidence"}]
     flow_history: list[dict[str, Any]] = field(default_factory=list)
@@ -548,6 +554,13 @@ VERDICT_SIGN = {
     "no-data": 0.0,
 }
 FLOW_STALE_DAYS = 5
+VERDICT_STALE_DAYS = 4  # calendar days; covers Fri verdict -> Mon/Tue run, drops week-old verdicts
+DIRECTION_CLASS = {"bullish": 1, "bearish": -1, "protective": -1, "covered-call-selling": 0, "mixed": 0, "no-data": 0}
+
+
+def verdict_is_stale(verdict_date: Any, as_of_date: date) -> bool:
+    d = parse_iso_date(verdict_date)
+    return d is None or (as_of_date - d).days > VERDICT_STALE_DAYS
 FLOW_STRONG = 40.0
 FLOW_LEAN = 15.0
 
@@ -587,8 +600,12 @@ def flow_label_for(score: float | None) -> str:
 def compute_flow_composite(bundle: SymbolSignalBundle, as_of_date: date) -> SymbolSignalBundle:
     """Fuse the four flow sources into one -100..+100 score on the bundle.
 
-      verdict        35%  flow_verdict_rows verdict sign x alert confidence
-                          (alert_count / 10, floor 0.3, cap 1.0; the alerts call is capped at 20)
+      verdict        35%  flow_verdict_rows verdict sign x alert confidence. With the
+                          uncapped stats (alert_count_total, premium_tilt from
+                          flow_alert_stats.py): 0.5 x sign x min(1, total/40) [floor 0.3]
+                          + 0.5 x premium_tilt. Without them: sign x alert_count/10
+                          (floor 0.3, cap 1.0; legacy agent sample capped at 20).
+                          Verdicts older than VERDICT_STALE_DAYS are dropped (missing).
       premium_today  30%  latest option_flow_symbol_signals premium tilt
       premium_3d     20%  mean tilt over the last 3 signal dates (persistence)
       darkpool       15%  darkpool_symbol_daily net / total premium x 1.5, clipped
@@ -602,13 +619,24 @@ def compute_flow_composite(bundle: SymbolSignalBundle, as_of_date: date) -> Symb
       - verdict_vs_premium: verdict bullish/bearish but today's tilt points the other
         way with |tilt| >= 0.4
       - darkpool_vs_options: |darkpool| >= 0.5 and opposite to the options side
+      - verdict_vs_alert_premium: agent verdict and the deterministic verdict_quant
+        from the full alert tape point in opposite directions
     """
     comps: dict[str, float] = {}
     verdict = str(bundle.verdict or "no-data").strip().lower()
-    if verdict in VERDICT_SIGN and verdict != "no-data":
-        ac = bundle.flow_alert_count
-        conf = 0.6 if ac is None else max(0.3, min(1.0, ac / 10.0))
-        comps["verdict"] = VERDICT_SIGN[verdict] * conf
+    if bundle.verdict_date is not None and verdict_is_stale(bundle.verdict_date, as_of_date):
+        bundle.verdict_stale = True
+    if verdict in VERDICT_SIGN and verdict != "no-data" and not bundle.verdict_stale:
+        total = bundle.alert_count_total
+        tilt = bundle.alert_premium_tilt
+        if total is not None and tilt is not None:
+            conf = max(0.3, min(1.0, total / 40.0))
+            leg = 0.5 * VERDICT_SIGN[verdict] * conf + 0.5 * max(-1.0, min(1.0, tilt))
+        else:
+            ac = bundle.flow_alert_count
+            conf = 0.6 if ac is None else max(0.3, min(1.0, ac / 10.0))
+            leg = VERDICT_SIGN[verdict] * conf
+        comps["verdict"] = max(-1.0, min(1.0, leg))
 
     hist = sorted(
         [h for h in (bundle.flow_history or []) if h.get("signal_date")],
@@ -630,6 +658,10 @@ def compute_flow_composite(bundle: SymbolSignalBundle, as_of_date: date) -> Symb
     if verdict in {"bullish", "bearish"} and today is not None and abs(today) >= 0.4:
         if (VERDICT_SIGN[verdict] > 0) != (today > 0):
             conflicts.append("verdict_vs_premium")
+    q = DIRECTION_CLASS.get(str(bundle.verdict_quant or "").lower(), 0)
+    a = DIRECTION_CLASS.get(verdict, 0)
+    if not bundle.verdict_stale and a != 0 and q != 0 and a != q:
+        conflicts.append("verdict_vs_alert_premium")
     options_side = [comps[k] for k in ("verdict", "premium_today") if k in comps]
     dp = comps.get("darkpool")
     if dp is not None and abs(dp) >= 0.5 and options_side:
@@ -660,6 +692,11 @@ def compute_flow_composite(bundle: SymbolSignalBundle, as_of_date: date) -> Symb
         **{k: round(v, 3) for k, v in comps.items()},
         "missing": [k for k in FLOW_WEIGHTS if k not in comps],
         "flow_signal_date": latest_date.isoformat() if latest_date else None,
+        "verdict_date": bundle.verdict_date,
+        "verdict_stale": bundle.verdict_stale,
+        "verdict_quant": bundle.verdict_quant,
+        "alert_count_total": bundle.alert_count_total,
+        "alert_premium_tilt": bundle.alert_premium_tilt,
     }
     return bundle
 
@@ -969,6 +1006,8 @@ def _make_opportunity_row(
         cautions.append("FRONT_IV_ELEVATED")
     for c in bundle.flow_conflicts or []:
         cautions.append(f"FLOW_CONFLICT_{c.upper()}")
+    if bundle.verdict_stale:
+        cautions.append("VERDICT_STALE")
 
     return {
         "opportunity_key": opp_key,
@@ -2294,6 +2333,15 @@ def main(argv: list[str] | None = None) -> int:
                 bundle.verdict_reasons = list(fr.get("reasons") or fr.get("verdict_reasons") or []) + list(fr.get("caveats") or [])
                 bundle.key_flows = fr.get("key_flows") or []
                 bundle.flow_alert_count = safe_int(fr.get("alert_count"))
+                bundle.verdict_date = str(fr.get("verdict_date") or "")[:10] or None
+                bundle.alert_count_total = safe_int(fr.get("alert_count_total"))
+                bundle.alert_premium_tilt = safe_float(fr.get("premium_tilt"))
+                bundle.verdict_quant = fr.get("verdict_quant")
+                if verdict_is_stale(bundle.verdict_date, report_date):
+                    # A week-old verdict must not gate today's strategies.
+                    bundle.verdict_reasons.insert(0, f"VERDICT_STALE: {bundle.verdict} as of {bundle.verdict_date}")
+                    bundle.verdict = "no-data"
+                    bundle.verdict_stale = True
                 if fr.get("next_earnings_date"):
                     next_earn_override = str(fr.get("next_earnings_date"))[:10]
 

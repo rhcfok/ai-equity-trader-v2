@@ -679,3 +679,44 @@ del _name, _fn
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
+
+
+# ---------------------------------------------------------------------------
+# Verdict freshness + uncapped alert stats (2026-10-29)
+# ---------------------------------------------------------------------------
+
+
+def test_stale_verdict_is_dropped_from_composite():
+    b = base_bundle(verdict="bullish", flow_alert_count=20, dp_total_premium_mm=0.0, dp_net_mm=None)
+    b.verdict_date = "2026-10-20"
+    b.flow_history = [_sig("2026-10-28", 10.0, 20.0, 0.5)]
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert b.verdict_stale is True
+    assert "verdict" in b.flow_components["missing"]
+    assert b.flow_components["verdict_date"] == "2026-10-20"
+
+
+def test_friday_verdict_still_fresh_on_tuesday():
+    assert r.verdict_is_stale("2026-10-23", date(2026, 10, 27)) is False
+    assert r.verdict_is_stale("2026-10-23", date(2026, 10, 28)) is True
+    assert r.verdict_is_stale(None, date(2026, 10, 28)) is True
+
+
+def test_uncapped_stats_weight_the_verdict_leg():
+    thin = base_bundle(verdict="bullish", flow_alert_count=3, dp_total_premium_mm=0.0, dp_net_mm=None)
+    thin.verdict_date, thin.alert_count_total, thin.alert_premium_tilt = "2026-10-29", 3, 0.1
+    deep = base_bundle(verdict="bullish", flow_alert_count=20, dp_total_premium_mm=0.0, dp_net_mm=None)
+    deep.verdict_date, deep.alert_count_total, deep.alert_premium_tilt = "2026-10-29", 240, 0.8
+    r.compute_flow_composite(thin, date(2026, 10, 29))
+    r.compute_flow_composite(deep, date(2026, 10, 29))
+    assert thin.flow_components["verdict"] == pytest.approx(0.5 * 0.3 + 0.5 * 0.1, abs=1e-3)
+    assert deep.flow_components["verdict"] == pytest.approx(0.9, abs=1e-3)
+    assert deep.flow_composite > thin.flow_composite
+
+
+def test_verdict_vs_alert_premium_conflict():
+    b = base_bundle(verdict="bearish", flow_alert_count=20, dp_total_premium_mm=0.0, dp_net_mm=None)
+    b.verdict_date, b.verdict_quant, b.alert_count_total, b.alert_premium_tilt = "2026-10-29", "bullish", 300, 0.6
+    r.compute_flow_composite(b, date(2026, 10, 29))
+    assert "verdict_vs_alert_premium" in b.flow_conflicts
+    assert b.flow_components["verdict_quant"] == "bullish"
