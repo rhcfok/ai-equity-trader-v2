@@ -30,7 +30,16 @@ python scripts/pull_jlaw.py --out .
 
 ### Step 2 — 逐标的拉期权流
 
-对每个候选调用 `get_flow_alerts(ticker_symbol=<symbol>, newer_than=<5 个自然日前>, limit=20)`。
+**2a. 先跑全量溢价统计（2026-10-29 起必做）**——不再只看最近 20 条：
+
+```bash
+python scripts/flow_alert_stats.py --date <date> --symbols <候选逗号列表> --out .
+```
+
+脚本按 `limit=200` + `older_than` 游标翻页拉完 5 日窗口内**全部** flow alerts（默认最多 5 页 = 1,000 条/只，`alerts_capped=true` 表示仍有更早的），按溢价和成交侧汇总：bull = call ask 侧 + put bid 侧，bear = put ask 侧 + call bid 侧（按期限加权：≤42 DTE ×1、43–365 ×0.6、>365 ×0.25），输出 `alert_count_total`、`premium_tilt`（−1..+1）、`sweep_share`、`largest_alert` 与确定性 `verdict_quant`。写 `flow_alert_stats_<date>.json`。
+（背景：10-29 的 70 个 bullish 里 41 个正好 20 条——撞上 limit=20 的上限；3 条 alert 的标的与 20 条的同一标签。）
+
+**2b. 再取代表性大单**：`get_flow_alerts(ticker_symbol=<symbol>, newer_than=<5 个自然日前>, min_premium=150000, limit=50)`，用于写 `key_flows` 证据。
 
 ### Step 2.5 — 全量覆盖策略（full coverage）
 
@@ -45,6 +54,8 @@ python scripts/pull_jlaw.py --out .
 双 agent 并行时按管线分摊（一台查 chart 候选、一台查 yahoo 候选），各自产出 flow verdict 后合并 JSON。
 
 ### Step 3 — 判读规则（每条流按下表归类）
+
+**锚定规则 Anchor**：先看 `flow_alert_stats_<date>.json` 的 `verdict_quant` 与 `premium_tilt`，再用下表定性判读。agent verdict 与 `verdict_quant` 方向不同（bull / bear〔含 protective〕/ neutral）时允许保留判断，但**必须**在该标的 `caveats` 写入 `quant_disagree:<verdict_quant>` 并在 `reasons` 写一句理由（如"tilt +0.62 来自远月备兑，近月 put ask 侧主导"）。`alert_count_total < 3` 或总溢价 < $100K → 直接 `no-data`。
 
 | verdict | 判据 | 参考案例 |
 |---|---|---|
@@ -99,7 +110,7 @@ python scripts/pull_jlaw.py --out .
 3. **完跑置位**：全部查完后 `status='complete'`，`rated_count` 定稿
 4. **全覆盖兜底**：`rated_count` 必须 = `candidates_total`（`no-data` verdict 计入 rated），才可置 `complete`；若仍有 `reason='uw_error'` 的 unrated，保持 `partial` 并按 5 分钟间隔重查
 5. REST upsert：POST `/flow-verdicts`，header 加 `Prefer: resolution=merge-duplicates`
-6. **归一化行同步（完跑必做）**：status 置 `complete` 前，执行 `python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_<date>.json`，把 `verdicts[]` 逐 symbol 解包并 upsert 到 `public.flow_verdict_rows`（PK `(verdict_date, symbol)`，重复执行自动合并、幂等）。表结构见 `sql/flow_verdict_rows.sql`——**首次使用前需在 Supabase SQL 编辑器执行一次该 DDL**。存量 blob 行可用 `python scripts/upsert_flow_verdict_rows.py --pull-from-supabase` 一次性回填（6 行历史 ≈ 1,100+ 条 symbol 行）。**upsert 后核对该日期行数 = `rated_count`，不一致不得报完跑**（2026-10-19→10-22 曾因漏跑本步导致归一化表停滞，下游 option-davis / uw-options-income-engine 读的是这张表）。
+6. **归一化行同步（完跑必做）**：status 置 `complete` 前，执行 `python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_<date>.json`（同目录下的 `flow_alert_stats_<date>.json` 自动合并，写入 `alert_count_total` / `premium_tilt` / `verdict_quant` / `verdict_agree` 等列；也可 `--stats <path>` 显式指定；事后补算用 `python scripts/flow_alert_stats.py --date <date> --from-verdict-rows --patch-verdict-rows`），把 `verdicts[]` 逐 symbol 解包并 upsert 到 `public.flow_verdict_rows`（PK `(verdict_date, symbol)`，重复执行自动合并、幂等）。表结构见 `sql/flow_verdict_rows.sql`——**首次使用前需在 Supabase SQL 编辑器执行一次该 DDL**。存量 blob 行可用 `python scripts/upsert_flow_verdict_rows.py --pull-from-supabase` 一次性回填（6 行历史 ≈ 1,100+ 条 symbol 行）。**upsert 后核对该日期行数 = `rated_count`，不一致不得报完跑**（2026-10-19→10-22 曾因漏跑本步导致归一化表停滞，下游 option-davis / uw-options-income-engine 读的是这张表）。
 
 ## 已知坑
 

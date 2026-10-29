@@ -66,17 +66,17 @@ One −100…+100 score per ticker, fusing four sources that previously sat side
 
 | Leg | Weight | Source | Value in [−1, 1] |
 |---|---:|---|---|
-| `verdict` | 35% | `flow_verdict_rows` | bullish +1 / bearish −1 / protective −0.5 / covered-call-selling −0.3 / mixed 0, × alert confidence `clip(alert_count/10, 0.3, 1)` (the alerts call is capped at 20, so alert count is a confidence, not a magnitude) |
+| `verdict` | 35% | `flow_verdict_rows` | bullish +1 / bearish −1 / protective −0.5 / covered-call-selling −0.3 / mixed 0, × alert confidence. When the uncapped stats from `UW-option-breakout/scripts/flow_alert_stats.py` are on the row (`alert_count_total`, `premium_tilt`): `0.5 × sign × clip(alert_count_total/40, 0.3, 1) + 0.5 × premium_tilt`. Otherwise legacy `sign × clip(alert_count/10, 0.3, 1)` (agent sample capped at 20). Verdicts older than 4 calendar days (`VERDICT_STALE_DAYS`) are dropped and the row's `verdict` is demoted to `no-data` with caution `VERDICT_STALE` |
 | `premium_today` | 30% | latest `option_flow_symbol_signals` row | premium tilt = `sign(net_directional_premium) × directional_confidence × size`, size = `clip(log10(unusual_premium $M)/2, 0.3, 1)` |
 | `premium_3d` | 20% | last 3 signal dates | mean tilt (missing days = 0), i.e. persistence |
 | `darkpool` | 15% | `darkpool_symbol_daily` | `clip(1.5 × net_premium / total_premium)` |
 
-- **Why tilt, not `net_bias_z`:** `net_bias_z` is a plain mean/stdev cross-sectional z-score of dollar net premium. One outsized name dominates it (2026-10-28: MU z = +6.66 pushed ~50 of 61 tickers to about −0.27). The tilt is per ticker and bounded. `net_bias_z` is still stored for reference.
+- **Why tilt, not `net_bias_z`:** until 2026-10-29 `net_bias_z` was a plain mean/stdev cross-sectional z-score of dollar net premium, which one outsized name dominated (2026-10-28: MU z = +6.66 pushed ~50 of 61 tickers to about −0.27). It is now a robust z (signed-log premium, median/MAD, ±5 clip; MU +2.16, META −2.73 on 10-28), but the per-ticker tilt is still used here because it does not depend on who else is in the day's cross-section. `net_bias_z` is stored for reference.
 - **Coverage:** missing options legs are dropped and the remaining options weights renormalised to 85%. Dark pool keeps a fixed 15% and **on its own can move the score by at most ±15 and leaves the label `neutral`**. Flow signals older than 5 calendar days are treated as missing.
 - **Labels:** `strong_bull ≥ 40`, `bull ≥ 15`, `neutral`, `bear ≤ −15`, `strong_bear ≤ −40`.
-- **Conflicts (`flow_conflicts`, also `caution = FLOW_CONFLICT_*`):** `verdict_vs_premium` (verdict bullish/bearish but today's tilt points the other way with |tilt| ≥ 0.4, e.g. MU 2026-10-28 bearish verdict vs +$448M bullish premium); `darkpool_vs_options` (|darkpool| ≥ 0.5 and opposite to the options side, e.g. META 2026-10-28 bullish verdict vs −$2.85B dark pool).
+- **Conflicts (`flow_conflicts`, also `caution = FLOW_CONFLICT_*`):** `verdict_vs_premium` (verdict bullish/bearish but today's tilt points the other way with |tilt| ≥ 0.4, e.g. MU 2026-10-28 bearish verdict vs +$448M bullish premium); `darkpool_vs_options` (|darkpool| ≥ 0.5 and opposite to the options side, e.g. META 2026-10-28 bullish verdict vs −$2.85B dark pool); `verdict_vs_alert_premium` (agent verdict and the deterministic `verdict_quant` from the full alert tape point in opposite directions; protective counts as bearish).
 - **Gates using the composite:** `strong_bear` vetoes `WHEEL_CSP` and `BULL_PUT_SPREAD`; `DIAGONAL_SPREAD` needs `bull`/`strong_bull` and no conflicts; `SHORT_STRANGLE` needs `|flow_composite| < 30`; `WHEEL_CC` also opens on `bear`/`strong_bear`; `BEAR_CALL_SPREAD` as in §3.
-- **Persisted columns:** `flow_alert_count`, `flow_composite`, `flow_label`, `flow_conflicts`, `flow_components` (leg values + `missing` + `flow_signal_date`).
+- **Persisted columns:** `flow_alert_count`, `flow_composite`, `flow_label`, `flow_conflicts`, `flow_components` (leg values + `missing` + `flow_signal_date` + `verdict_date` / `verdict_stale` / `verdict_quant` / `alert_count_total` / `alert_premium_tilt`).
 
 Score bands:
 - **85–100:** `STRONG`

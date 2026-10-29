@@ -25,6 +25,14 @@ description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_
 4. **覆盖率**：`rated_count` = `candidates_total`（`no-data` verdict 计入 rated）；不足视为 partial（2026-10-13 起 agent B 已全量覆盖，`quota_exhausted` 已废除，残留 `reason='uw_error'` 的 unrated 属 API 失败）
 5. **schema**：`payload` 含 `verdicts` / `unrated` / `market_tide` 三个键
 6. **降级路径**：超时仍未 complete → 按 `unrated` 口径跑简报（A/B 级只含已有 verdict 的标的），简报头部注明"flow 数据不全，结论偏保守"
+7. **数据新鲜度 + 期权流对账（2026-10-29 起必跑）**：
+
+```bash
+python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --out .
+```
+
+输出 `flow_reconcile_<date>.md/.json`：(a) 各上游表最新日期与滞后工作日数（`flow_verdict_rows` / `"flow-verdicts"` / `option_flow_symbol_signals` / `darkpool_symbol_daily` / `gex_snapshot` / `trade-jlaw-v2` …）及暗池快照重复检测；(b) 每只标的的 verdict × 全量 alert 溢价（`verdict_quant` / `premium_tilt`）× Full Tape 溢价倾斜（今日 / 3 日）× robust `net_bias_z` × 暗池的对账，复用 income engine 的 `compute_flow_composite()`，状态 `confirmed` / `conflict` / `partial`。
+**简报"数据缺口 Data gaps"只能引用该新鲜度表**，不得沿用前一日文字（教训：10-29 简报连续五天写 `option_flow_symbol_signals` "停更 10-13"，实际有 10-28 数据；agent 手写缺口导致 IV-aware Full Tape 信号被弃用）。
 
 ## 工作流
 
@@ -45,6 +53,12 @@ description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_
 - `protective` / `covered-call-selling` → 降级为"观察"，注明原因
 - `mixed` / `no-data` → 中性，不加分不否决
 - `earnings_block: true`（财报 < 2 周）→ **不建仓**（BAC 案例）；财报 2–4 周 → 注明"财报前减仓/收紧止损"
+
+**对账覆盖（读 `flow_reconcile_<date>.json`）**：
+- "三重确认 Triple-confirmed" 只给 `status = confirmed` 的标的（verdict、综合 flow 标签、暗池三者同向）
+- `status = conflict` 的标的（`verdict_vs_premium` / `darkpool_vs_options` / `verdict_vs_alert_premium`）**不得写成单一方向结论**：A 级降为 B 级、期权收入板仓位减半或跳过，并在"回避/冲突"段原样列出冲突类型（案例：10-28 MU verdict bearish 而 Full Tape 溢价 +0.74、META verdict bullish 而暗池 −$2.85B）
+- `verdict_stale = true`（verdict 超 4 日）按 `no-data` 处理
+- 引用 alert 数量用 `alert_count_total`（全量），不要用 `alert_count`（旧口径上限 20）
 
 ### Step 3 — Regime 判定（确定性评分 Deterministic score，2026-10-29 起）
 
@@ -124,7 +138,14 @@ python skills/daily-trading-briefing/scripts/regime_score.py \
 
 1. 写 `briefing_<date>.md` 到工作区（覆盖当日旧版），结构：Regime（`regime_<date>.md` + 脆弱度要点）→ A 级（参数表）→ B 级（汇总表）→ 回避/冲突（含原因）→ 执行要点 → 数据来源
 2. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。**2026-10-21 起解析器弃用 `<details>/<summary>`**（与 `<table>` 组合会被拒绝："bare <tr> is not valid"）——改用规范 `<toggle>` 语法：`<toggle>` 首行为标题（如 `📊 交易决策简报 <date> Trading Decision Briefing — ...`），随后空行，正文，`</toggle>`。当日重跑时用 `update_content` 定点替换**仅当日**的 toggle 内容（old_str 从当日 `notion-fetch` 原样复制；存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格；优先用无格式纯文本尾锚定位）；解析失败回退：先插最小探针 toggle，fetch 读其序列化形式再定点展开。历史日期的折叠块保留不动
-3. 回复用户给精简表格版 + 文件链接 + "研究分析非投资建议"
+3. **发布前标签核对（必做，先于第 2 步 Notion 同步）**：
+
+```bash
+python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --check-board briefing_<date>.md --strict
+```
+
+退出码 1 = 简报中有标签与 `flow_verdict_rows` 不符（如 10-29 PANW 写 "bullish verdict" 实为 mixed、CAT 写 "verdict 待核" 实为 mixed）或把新鲜表写成 stale。逐条修正后重跑至 0 再同步 Notion。
+4. 回复用户给精简表格版 + 文件链接 + "研究分析非投资建议"
 
 ## 已知坑
 
@@ -136,6 +157,7 @@ python skills/daily-trading-briefing/scripts/regime_score.py \
 - Notion 表格必须用 `<table>` 增强 Markdown 语法，不能用标准 markdown 表格
 - **Notion 解析器 2026-10-21 变更**：`<details>/<summary>` 已弃用（自动转 `<toggle>`），与 `<table>` 组合直接报错 "bare <tr> is not valid"；一律写 `<toggle>`（标题在首行 + 空行 + 正文）。页面存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格——update_content 的 old_str 须原样复制；优先用纯文本尾锚（句尾无格式片段）定位
 - `regime_score.py` 依赖 Yahoo chart API（与 jlaw-yahoo-runner 相同），偶发 429 会自动重试；SPY 未出当日收盘时按 SPY 日期对齐（VIX 当日值不会被提前使用）
+- `option_flow_symbol_signals.net_bias_z` 2026-10-29 起为 robust z（signed-log 溢价 + median/MAD，±5 截断），历史行已回填；旧版 mean/stdev z 会被单一异常值（MU +6.66）压扁全体——跨日比较以回填后数值为准
 - `trade-stldc-v2` 2026-10-27 起覆盖从 67 扩至 257 只，比例类指标不受影响，但跨期比较绝对数无意义
 - 脆弱度仪表盘：LPI 为周度合成（滞后数日）、页面 ~07:19 UTC 更新，引用时带 as-of 日期；卡片偶见未来日期 quirk 与个别 stale 源，读数时计入
 
