@@ -101,6 +101,22 @@ class SymbolSignalBundle:
     bullish_z: float | None = None
     bearish_z: float | None = None
     net_bias_z: float | None = None
+    flow_alert_count: int | None = None
+    verdict_date: str | None = None
+    verdict_stale: bool = False
+    # Uncapped premium-weighted alert stats (UW-option-breakout/scripts/flow_alert_stats.py)
+    alert_count_total: int | None = None
+    alert_premium_tilt: float | None = None
+    verdict_quant: str | None = None
+    # Recent option_flow_symbol_signals rows for this ticker (newest first):
+    # [{"signal_date", "net_directional_premium", "unusual_premium", "directional_confidence"}]
+    flow_history: list[dict[str, Any]] = field(default_factory=list)
+
+    # Combined unusual-flow score (compute_flow_composite)
+    flow_composite: float | None = None
+    flow_label: str = "neutral"
+    flow_conflicts: list[str] = field(default_factory=list)
+    flow_components: dict[str, Any] = field(default_factory=dict)
 
     # J Law v2 structure
     jlaw_run_date: str | None = None
@@ -525,6 +541,179 @@ def evaluate_strike_flow_prints(
 
 
 # ---------------------------------------------------------------------------
+# Combined Unusual-Flow Score
+# ---------------------------------------------------------------------------
+
+FLOW_WEIGHTS = {"verdict": 0.35, "premium_today": 0.30, "premium_3d": 0.20, "darkpool": 0.15}
+VERDICT_SIGN = {
+    "bullish": 1.0,
+    "bearish": -1.0,
+    "protective": -0.5,
+    "covered-call-selling": -0.3,
+    "mixed": 0.0,
+    "no-data": 0.0,
+}
+FLOW_STALE_DAYS = 5
+VERDICT_STALE_DAYS = 4  # calendar days; covers Fri verdict -> Mon/Tue run, drops week-old verdicts
+DIRECTION_CLASS = {"bullish": 1, "bearish": -1, "protective": -1, "covered-call-selling": 0, "mixed": 0, "no-data": 0}
+
+
+def verdict_is_stale(verdict_date: Any, as_of_date: date) -> bool:
+    d = parse_iso_date(verdict_date)
+    return d is None or (as_of_date - d).days > VERDICT_STALE_DAYS
+FLOW_STRONG = 40.0
+FLOW_LEAN = 15.0
+
+
+def _premium_tilt(row: dict[str, Any]) -> float:
+    """Per-ticker premium tilt in [-1, 1] from one option_flow_symbol_signals row.
+
+    sign(net_directional_premium) x directional_confidence (0 when the upstream
+    evidence gate fails) x size factor (log-scaled unusual premium: $5M -> 0.35,
+    $40M -> 0.80, >= $100M -> 1.0). Per-ticker on purpose: the cross-sectional
+    net_bias_z is a plain mean/stdev z-score, so one outsized name (e.g. MU +$448M
+    on 2026-10-28, z = 6.66) pushes every other ticker to about -0.3.
+    """
+    net = safe_float(row.get("net_directional_premium")) or 0.0
+    conf = safe_float(row.get("directional_confidence")) or 0.0
+    unusual_mm = (safe_float(row.get("unusual_premium")) or 0.0) / 1e6
+    if net == 0.0 or conf <= 0.0 or unusual_mm <= 0.0:
+        return 0.0
+    size = max(0.3, min(1.0, math.log10(max(unusual_mm, 1.0)) / 2.0))
+    return max(-1.0, min(1.0, math.copysign(conf * size, net)))
+
+
+def flow_label_for(score: float | None) -> str:
+    if score is None:
+        return "neutral"
+    if score >= FLOW_STRONG:
+        return "strong_bull"
+    if score >= FLOW_LEAN:
+        return "bull"
+    if score <= -FLOW_STRONG:
+        return "strong_bear"
+    if score <= -FLOW_LEAN:
+        return "bear"
+    return "neutral"
+
+
+def compute_flow_composite(bundle: SymbolSignalBundle, as_of_date: date) -> SymbolSignalBundle:
+    """Fuse the four flow sources into one -100..+100 score on the bundle.
+
+      verdict        35%  flow_verdict_rows verdict sign x alert confidence. With the
+                          uncapped stats (alert_count_total, premium_tilt from
+                          flow_alert_stats.py): 0.5 x sign x min(1, total/40) [floor 0.3]
+                          + 0.5 x premium_tilt. Without them: sign x alert_count/10
+                          (floor 0.3, cap 1.0; legacy agent sample capped at 20).
+                          Verdicts older than VERDICT_STALE_DAYS are dropped (missing).
+      premium_today  30%  latest option_flow_symbol_signals premium tilt
+      premium_3d     20%  mean tilt over the last 3 signal dates (persistence)
+      darkpool       15%  darkpool_symbol_daily net / total premium x 1.5, clipped
+                          (low weight: print-side inference is noisy)
+
+    Missing options legs are dropped and the remaining options weights renormalised to
+    85%; dark pool keeps a fixed 15% and alone can move the score by at most +/-15
+    with the label forced to neutral. Flow signals older than
+    FLOW_STALE_DAYS calendar days are treated as missing. Conflicts are recorded,
+    not netted silently:
+      - verdict_vs_premium: verdict bullish/bearish but today's tilt points the other
+        way with |tilt| >= 0.4
+      - darkpool_vs_options: |darkpool| >= 0.5 and opposite to the options side
+      - verdict_vs_alert_premium: agent verdict and the deterministic verdict_quant
+        from the full alert tape point in opposite directions
+    """
+    comps: dict[str, float] = {}
+    verdict = str(bundle.verdict or "no-data").strip().lower()
+    if bundle.verdict_date is not None and verdict_is_stale(bundle.verdict_date, as_of_date):
+        bundle.verdict_stale = True
+    if verdict in VERDICT_SIGN and verdict != "no-data" and not bundle.verdict_stale:
+        total = bundle.alert_count_total
+        tilt = bundle.alert_premium_tilt
+        if total is not None and tilt is not None:
+            conf = max(0.3, min(1.0, total / 40.0))
+            leg = 0.5 * VERDICT_SIGN[verdict] * conf + 0.5 * max(-1.0, min(1.0, tilt))
+        else:
+            ac = bundle.flow_alert_count
+            conf = 0.6 if ac is None else max(0.3, min(1.0, ac / 10.0))
+            leg = VERDICT_SIGN[verdict] * conf
+        comps["verdict"] = max(-1.0, min(1.0, leg))
+
+    hist = sorted(
+        [h for h in (bundle.flow_history or []) if h.get("signal_date")],
+        key=lambda h: str(h["signal_date"]),
+        reverse=True,
+    )
+    latest_date = parse_iso_date(hist[0]["signal_date"]) if hist else None
+    if latest_date and (as_of_date - latest_date).days <= FLOW_STALE_DAYS:
+        tilts = [_premium_tilt(h) for h in hist[:3]]
+        comps["premium_today"] = tilts[0]
+        comps["premium_3d"] = sum(tilts) / 3.0  # missing days count as zero
+
+    dp_tot = bundle.dp_total_premium_mm or 0.0
+    if dp_tot > 0 and bundle.dp_net_mm is not None:
+        comps["darkpool"] = max(-1.0, min(1.0, 1.5 * bundle.dp_net_mm / dp_tot))
+
+    conflicts: list[str] = []
+    today = comps.get("premium_today")
+    if verdict in {"bullish", "bearish"} and today is not None and abs(today) >= 0.4:
+        if (VERDICT_SIGN[verdict] > 0) != (today > 0):
+            conflicts.append("verdict_vs_premium")
+    q = DIRECTION_CLASS.get(str(bundle.verdict_quant or "").lower(), 0)
+    a = DIRECTION_CLASS.get(verdict, 0)
+    if not bundle.verdict_stale and a != 0 and q != 0 and a != q:
+        conflicts.append("verdict_vs_alert_premium")
+    options_side = [comps[k] for k in ("verdict", "premium_today") if k in comps]
+    dp = comps.get("darkpool")
+    if dp is not None and abs(dp) >= 0.5 and options_side:
+        opt = sum(options_side) / len(options_side)
+        if abs(opt) >= 0.2 and (opt > 0) != (dp > 0):
+            conflicts.append("darkpool_vs_options")
+
+    # Options legs are renormalised among themselves; dark pool keeps its fixed 15%
+    # share and can never set the label on its own (dark-pool-only -> neutral).
+    opt_keys = [k for k in ("verdict", "premium_today", "premium_3d") if k in comps]
+    if opt_keys:
+        w_opt = sum(FLOW_WEIGHTS[k] for k in opt_keys)
+        opt_score = sum(FLOW_WEIGHTS[k] * comps[k] for k in opt_keys) / w_opt
+        if dp is not None:
+            score = round(100.0 * ((1.0 - FLOW_WEIGHTS["darkpool"]) * opt_score + FLOW_WEIGHTS["darkpool"] * dp), 1)
+        else:
+            score = round(100.0 * opt_score, 1)
+        label = flow_label_for(score)
+    elif dp is not None:
+        score = round(100.0 * FLOW_WEIGHTS["darkpool"] * dp, 1)
+        label = "neutral"
+    else:
+        score, label = None, "neutral"
+    bundle.flow_composite = score
+    bundle.flow_label = label
+    bundle.flow_conflicts = conflicts
+    bundle.flow_components = {
+        **{k: round(v, 3) for k, v in comps.items()},
+        "missing": [k for k in FLOW_WEIGHTS if k not in comps],
+        "flow_signal_date": latest_date.isoformat() if latest_date else None,
+        "verdict_date": bundle.verdict_date,
+        "verdict_stale": bundle.verdict_stale,
+        "verdict_quant": bundle.verdict_quant,
+        "alert_count_total": bundle.alert_count_total,
+        "alert_premium_tilt": bundle.alert_premium_tilt,
+    }
+    return bundle
+
+
+def flow_alignment(strategy: str, composite: float | None) -> float:
+    """Map the flow composite to strategy alignment in [-1, 1]."""
+    c = (composite or 0.0) / 100.0
+    if strategy in {"WHEEL_CSP", "BULL_PUT_SPREAD", "DIAGONAL_SPREAD"}:
+        return c
+    if strategy in {"BEAR_CALL_SPREAD", "WHEEL_CC"}:
+        return -c
+    if strategy == "SHORT_STRANGLE":
+        return 1.0 - 2.0 * min(1.0, abs(c) / 0.5)  # 0 -> +1, |50| -> -1
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # Safety Floors, Ceilings & Earnings Clearance
 # ---------------------------------------------------------------------------
 
@@ -618,7 +807,7 @@ def score_opportunity(
     """
     Computes a deterministic 0-100 Confidence Score across 7 pillars:
       1. J Law Structure & Stop Buffer (0-20)
-      2. UW Flow & Dark Pool Confirmation (0-20)
+      2. Combined Unusual Flow (0-20)
       3. GEX Map & Corridor Quality (0-15)
       4. UW Fundamental & Analyst Quality (0-15)
       5. Volatility & Term-Structure Fit (0-10)
@@ -646,33 +835,17 @@ def score_opportunity(
         jlaw_pts += 2.0
     jlaw_pts = round(min(20.0, jlaw_pts), 2)
 
-    # 2. UW Flow & Dark Pool Confirmation (0-20)
-    flow_pts = 8.0
-    verdict = str(bundle.verdict or "no-data").lower()
-    if strategy in {"WHEEL_CSP", "BULL_PUT_SPREAD", "DIAGONAL_SPREAD"}:
-        if verdict == "bullish":
-            flow_pts += 6.0
-        elif verdict == "mixed":
-            flow_pts += 3.0
-    elif strategy in {"BEAR_CALL_SPREAD", "WHEEL_CC"}:
-        if verdict == "bearish":
-            flow_pts += 6.0
-        elif verdict == "mixed":
-            flow_pts += 4.0
-    elif strategy == "SHORT_STRANGLE":
-        if verdict in {"mixed", "no-data"}:
-            flow_pts += 6.0
-
-    if bundle.dp_accumulating is True and strategy in {"WHEEL_CSP", "BULL_PUT_SPREAD", "DIAGONAL_SPREAD"}:
-        flow_pts += 4.0
-    elif bundle.dp_accumulating is False and strategy in {"BEAR_CALL_SPREAD", "WHEEL_CC"}:
-        flow_pts += 4.0
-
+    # 2. Combined Unusual Flow (0-20): verdict + premium tilt + persistence + dark pool
+    #    fused in compute_flow_composite(), mapped by strategy direction.
+    align = flow_alignment(strategy, bundle.flow_composite)
+    flow_pts = 10.0 + 8.0 * align
+    if bundle.flow_conflicts and strategy != "SHORT_STRANGLE":
+        flow_pts -= 3.0
     if confirming_bids > 0:
         flow_pts += 2.0
     if adverse_sweeps > 0:
-        flow_pts = max(0.0, flow_pts - 8.0)
-    flow_pts = round(min(20.0, flow_pts), 2)
+        flow_pts -= 8.0
+    flow_pts = round(max(0.0, min(20.0, flow_pts)), 2)
 
     # 3. GEX Map & Corridor Quality (0-15)
     gex_pts = 5.0
@@ -831,6 +1004,10 @@ def _make_opportunity_row(
         cautions.append("VALUATION_EXPENSIVE")
     if vol.term_ratio_7_30 and vol.term_ratio_7_30 > 1.15:
         cautions.append("FRONT_IV_ELEVATED")
+    for c in bundle.flow_conflicts or []:
+        cautions.append(f"FLOW_CONFLICT_{c.upper()}")
+    if bundle.verdict_stale:
+        cautions.append("VERDICT_STALE")
 
     return {
         "opportunity_key": opp_key,
@@ -912,6 +1089,11 @@ def _make_opportunity_row(
         "bullish_z": bundle.bullish_z,
         "bearish_z": bundle.bearish_z,
         "net_bias_z": bundle.net_bias_z,
+        "flow_alert_count": bundle.flow_alert_count,
+        "flow_composite": bundle.flow_composite,
+        "flow_label": bundle.flow_label,
+        "flow_conflicts": bundle.flow_conflicts,
+        "flow_components": bundle.flow_components,
         "jlaw_run_date": bundle.jlaw_run_date,
         "jlaw_classification": bundle.jlaw_classification,
         "jlaw_score": bundle.jlaw_score,
@@ -976,6 +1158,10 @@ def generate_opportunities_for_symbol(
     safety_ceiling = compute_safety_ceiling(bundle)
     verdict = str(bundle.verdict or "no-data").strip().lower()
     jlaw_cls = str(bundle.jlaw_classification or "").strip().lower()
+    if bundle.flow_composite is None and not bundle.flow_components:
+        compute_flow_composite(bundle, report_date)
+    flow_c = bundle.flow_composite if bundle.flow_composite is not None else 0.0
+    flow_bull_veto = bundle.flow_label == "strong_bear"  # strong bearish flow blocks short-put structures
     ivr = vol.iv_rank if vol.iv_rank is not None else 35.0
     rsi = vol.rsi_14 if vol.rsi_14 is not None else 50.0
     term_7_30 = vol.term_ratio_7_30 if vol.term_ratio_7_30 is not None else 1.0
@@ -1004,6 +1190,7 @@ def generate_opportunities_for_symbol(
         and term_7_30 <= 1.25
         and 32.0 <= rsi <= 60.0
         and bundle.dp_accumulating is not False
+        and not flow_bull_veto
         and safety_floor is not None
     )
 
@@ -1117,6 +1304,7 @@ def generate_opportunities_for_symbol(
             rsi >= 60.0
             or "covered-call" in reasons_joined
             or verdict in {"mixed", "bearish"}
+            or bundle.flow_label in {"bear", "strong_bear"}
         )
     )
     if wheel_cc_regime_ok and safety_ceiling is not None:
@@ -1176,6 +1364,7 @@ def generate_opportunities_for_symbol(
         and verdict in {"bullish", "mixed"}
         and ivr >= 30.0
         and bundle.dp_accumulating is not False
+        and not flow_bull_veto
         and safety_floor is not None
     )
     if bps_regime_ok and safety_floor is not None:
@@ -1256,6 +1445,7 @@ def generate_opportunities_for_symbol(
         and ivr >= 45.0
         and 38.0 <= rsi <= 62.0
         and verdict in {"mixed", "no-data"}
+        and abs(flow_c) < 30.0
     )
     if strangle_regime_ok and bundle.gex_put_wall and bundle.gex_call_wall:
         put_floor = min(
@@ -1336,6 +1526,8 @@ def generate_opportunities_for_symbol(
         (jlaw_cls == "valid" or (jlaw_cls == "watch" and (bundle.jlaw_score or 0) >= 11))
         and verdict == "bullish"
         and bundle.dp_accumulating is True
+        and bundle.flow_label in {"bull", "strong_bull"}
+        and not bundle.flow_conflicts
         and ivr < 38.0
         and term_30_60 <= 1.08
     )
@@ -1415,8 +1607,10 @@ def generate_opportunities_for_symbol(
     # 6. BEAR_CALL_SPREAD (Bearish flow + DP distribution call vertical)
     # ------------------------------------------------------------------
     bcs_regime_ok = (
-        verdict == "bearish"
-        and ((bundle.bearish_z or 0.0) >= 1.0 or bundle.dp_accumulating is False)
+        (
+            (verdict == "bearish" and (flow_c <= -FLOW_LEAN or bundle.dp_accumulating is False))
+            or bundle.flow_label == "strong_bear"
+        )
         and ivr >= 30.0
         and safety_ceiling is not None
     )
@@ -1844,6 +2038,14 @@ class SupabaseRestClient:
 # ---------------------------------------------------------------------------
 
 
+def _flow_cell(r: dict[str, Any]) -> str:
+    fc = r.get("flow_composite")
+    if fc is None:
+        return "—"
+    flag = " ⚠" if r.get("flow_conflicts") else ""
+    return f"{fc:+.0f} `{r.get('flow_label')}`{flag}"
+
+
 def render_markdown_report(
     report_date: date,
     opportunities: list[dict[str, Any]],
@@ -1885,9 +2087,9 @@ def render_markdown_report(
         lines.append("No symbols passed all mechanical regime, support-floor, and NBBO economics gates today.")
     else:
         lines.append(
-            "| Rank | Symbol | Strategy | Bucket | Expiry (DTE) | Primary Leg | Leg 2 | Net Credit/Debit | RoR / Ann% | Floor / Ceiling | UW Valuation | IVR / RSI | Score (Band) |"
+            "| Rank | Symbol | Strategy | Bucket | Expiry (DTE) | Primary Leg | Leg 2 | Net Credit/Debit | RoR / Ann% | Floor / Ceiling | UW Valuation | IVR / RSI | Flow | Score (Band) |"
         )
-        lines.append("|---:|---|---|---|---|---|---|---:|---:|---|---|---|---:|")
+        lines.append("|---:|---|---|---|---|---|---|---:|---:|---|---|---|---|---:|")
         for idx, r in enumerate(opportunities, start=1):
             leg1_str = f"{r['short_type'].upper()} {r['short_strike']:.1f} (Δ {r['short_delta'] or 0:.2f})"
             leg2_str = (
@@ -1907,9 +2109,22 @@ def render_markdown_report(
                 f"| {idx} | **{r['symbol']}** | `{r['strategy']}` | `{r['dte_bucket']}` | "
                 f"{r['short_expiry']} ({r['short_dte']}d) | {leg1_str} | {leg2_str} | "
                 f"{price_label} | {ror_pct:.1f}% / {ann_pct:.1f}% | {floor_s} / {ceil_s} | "
-                f"`{r.get('uw_valuation_tier')}` | {ivr_s} / {rsi_s} | **{r['confidence_score']:.1f}** (`{r['score_band']}`) |"
+                f"`{r.get('uw_valuation_tier')}` | {ivr_s} / {rsi_s} | {_flow_cell(r)} | **{r['confidence_score']:.1f}** (`{r['score_band']}`) |"
             )
     lines.append("")
+
+    conflicted = [r for r in opportunities if r.get("flow_conflicts")]
+    if conflicted:
+        lines.append("### Flow Conflicts (sources disagree — size down or skip)")
+        lines.append("")
+        for r in conflicted:
+            fc = r.get("flow_components") or {}
+            lines.append(
+                f"- **{r['symbol']}** `{r['strategy']}`: {', '.join(r['flow_conflicts'])} — "
+                f"verdict `{r.get('verdict')}` ({fc.get('verdict')}), premium today {fc.get('premium_today')}, "
+                f"3d {fc.get('premium_3d')}, dark pool {fc.get('darkpool')}"
+            )
+        lines.append("")
 
     if lifecycle_updates:
         lines.append("## 3. Open Ledger Lifecycle & Defense Updates")
@@ -2033,6 +2248,24 @@ def main(argv: list[str] | None = None) -> int:
     symbols = build_watchlist_universe(wl_rows, override)
     print(f"Universe: {len(symbols)} watchlist symbols ({', '.join(WATCHLIST_CATEGORIES)})")
 
+    # Prefetch recent unusual-flow signals once for the whole universe (persistence leg)
+    flow_hist_by_sym: dict[str, list[dict[str, Any]]] = {}
+    sym_list = [s for s, _ in symbols]
+    for i in range(0, len(sym_list), 80):
+        chunk = sym_list[i : i + 80]
+        rows = sb.select(
+            "option_flow_symbol_signals",
+            params={
+                "select": "ticker,signal_date,net_directional_premium,unusual_premium,directional_confidence,"
+                "net_option_flow_bias,bullish_z,bearish_z,net_bias_z",
+                "ticker": f"in.({','.join(chunk)})",
+                "signal_date": f"gte.{(report_date - timedelta(days=10)).isoformat()}",
+                "order": "signal_date.desc",
+            },
+        )
+        for r in rows:
+            flow_hist_by_sym.setdefault(str(r.get("ticker") or "").upper(), []).append(r)
+
     all_candidates: list[dict[str, Any]] = []
     chain_cache: dict[str, list[OptionContractQuote]] = {}
     spot_cache: dict[str, float] = {}
@@ -2099,13 +2332,24 @@ def main(argv: list[str] | None = None) -> int:
                 bundle.verdict = str(fr.get("verdict") or "no-data")
                 bundle.verdict_reasons = list(fr.get("reasons") or fr.get("verdict_reasons") or []) + list(fr.get("caveats") or [])
                 bundle.key_flows = fr.get("key_flows") or []
+                bundle.flow_alert_count = safe_int(fr.get("alert_count"))
+                bundle.verdict_date = str(fr.get("verdict_date") or "")[:10] or None
+                bundle.alert_count_total = safe_int(fr.get("alert_count_total"))
+                bundle.alert_premium_tilt = safe_float(fr.get("premium_tilt"))
+                bundle.verdict_quant = fr.get("verdict_quant")
+                if verdict_is_stale(bundle.verdict_date, report_date):
+                    # A week-old verdict must not gate today's strategies.
+                    bundle.verdict_reasons.insert(0, f"VERDICT_STALE: {bundle.verdict} as of {bundle.verdict_date}")
+                    bundle.verdict = "no-data"
+                    bundle.verdict_stale = True
                 if fr.get("next_earnings_date"):
                     next_earn_override = str(fr.get("next_earnings_date"))[:10]
 
-            flow_sig = sb.select(
-                "option_flow_symbol_signals",
-                params={"select": "*", "ticker": f"eq.{sym}", "order": "signal_date.desc", "limit": "1"},
-            )
+            flow_sig = [
+                r for r in flow_hist_by_sym.get(sym, [])
+                if str(r.get("signal_date") or "") <= report_date.isoformat()
+            ]
+            bundle.flow_history = flow_sig[:3]
             if flow_sig:
                 fs = flow_sig[0]
                 bundle.flow_signal_date = fs.get("signal_date")
@@ -2145,6 +2389,7 @@ def main(argv: list[str] | None = None) -> int:
         if not bundle.spot_price:
             continue
 
+        compute_flow_composite(bundle, report_date)
         val_ctx = compute_uw_valuation_context(sym, bundle.spot_price, earnings_rows, [], as_of_date=report_date)
         if not val_ctx.earnings_date and next_earn_override:
             val_ctx.earnings_date = next_earn_override

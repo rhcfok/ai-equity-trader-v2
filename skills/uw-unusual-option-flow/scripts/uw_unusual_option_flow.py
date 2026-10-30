@@ -844,33 +844,59 @@ def no_signal_result(ticker: str, category: str | None, event_date: str, pa_trad
     }
 
 
-def apply_cross_sectional_scores(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add per-signal_date cross-sectional z-scores and percentile ranks.
+ROBUST_Z_SCALE = 1.4826  # MAD -> sigma for a normal distribution
+ROBUST_Z_CLIP = 5.0
 
-    Convention matches the SQL backfill of option_flow_symbol_signals:
-    z-scores of bullish_flow_score, bearish_flow_score, and their difference
-    within the day's full signal set, plus strict-less-than percentile ranks
-    (0-100). Days with a single row or zero variance receive None. Raw dollar
-    columns are kept untouched for audit.
+
+def signed_log_mm(value: float | None) -> float | None:
+    """sign(x) * ln(1 + |x| / $1M): compresses heavy-tailed dollar premium before scoring."""
+    if value is None:
+        return None
+    return math.copysign(math.log1p(abs(float(value)) / 1_000_000.0), float(value))
+
+
+def robust_center_scale(values: list[float | None]) -> tuple[float | None, float | None]:
+    """Median and scaled MAD of the non-null values.
+
+    Falls back to the sample standard deviation when MAD is zero (more than half
+    the values identical) and returns (median, None) for fewer than 3 values or
+    zero dispersion, which yields NULL z-scores (same contract as before).
+    """
+    clean = [float(value) for value in values if value is not None]
+    if len(clean) < 3:
+        return (median(clean) if clean else None), None
+    center = median(clean)
+    mad = median(abs(value - center) for value in clean) * ROBUST_Z_SCALE
+    if mad > 0:
+        return center, mad
+    mean = sum(clean) / len(clean)
+    std = math.sqrt(sum((value - mean) ** 2 for value in clean) / (len(clean) - 1))
+    return center, (std or None)
+
+
+def robust_zscore(value: float | None, center: float | None, scale: float | None) -> float | None:
+    if value is None or center is None or not scale:
+        return None
+    z = (value - center) / scale
+    return round(max(-ROBUST_Z_CLIP, min(ROBUST_Z_CLIP, z)), 4)
+
+
+def apply_cross_sectional_scores(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add per-signal_date cross-sectional robust z-scores and percentile ranks.
+
+    Scores are first compressed with signed_log_mm (dollar premium is
+    heavy-tailed: -$104M .. +$448M on 2026-10-28), then
+    z = (x - median) / (1.4826 * MAD), clipped to +/-5, within each
+    signal_date's full signal set for bullish_flow_score, bearish_flow_score and
+    their difference. Percentile ranks use the raw values (rank-invariant). Median/MAD (not mean/stdev) so one outsized name cannot
+    shift every other ticker: on 2026-10-28 MU's +$448M net pushed the plain
+    z-score of ~45/61 names to about -0.3. Percentile ranks use the
+    strict-less-than convention (0-100). Matches
+    sql/option_flow_symbol_signals_scores.sql. Raw dollar columns are untouched.
     """
     by_date: dict[str, list[dict[str, Any]]] = {}
     for row in results:
         by_date.setdefault(str(row.get("signal_date")), []).append(row)
-
-    def mean_std(values: list[float | None]) -> tuple[float | None, float | None]:
-        clean = [value for value in values if value is not None]
-        if not clean:
-            return None, None
-        mean = sum(clean) / len(clean)
-        if len(clean) < 2:
-            return mean, None  # matches SQL stddev() -> NULL on a single value
-        variance = sum((value - mean) ** 2 for value in clean) / (len(clean) - 1)
-        return mean, math.sqrt(variance)
-
-    def zscore(value: float | None, mean: float | None, std: float | None) -> float | None:
-        if value is None or mean is None or not std:
-            return None
-        return round((value - mean) / std, 4)
 
     def pct_rank(values: list[float | None], value: float | None) -> float | None:
         if value is None or len(values) < 2:
@@ -879,22 +905,24 @@ def apply_cross_sectional_scores(results: list[dict[str, Any]]) -> list[dict[str
         return round(strictly_less / (len(values) - 1) * 100, 2)
 
     for rows in by_date.values():
-        bull_mean, bull_std = mean_std([row.get("bullish_flow_score") for row in rows])
-        bear_mean, bear_std = mean_std([row.get("bearish_flow_score") for row in rows])
+        bull_values = [row.get("bullish_flow_score") for row in rows]
+        bear_values = [row.get("bearish_flow_score") for row in rows]
         net_values = [
             ((row.get("bullish_flow_score") or 0.0) - (row.get("bearish_flow_score") or 0.0))
             for row in rows
         ]
-        net_mean, net_std = mean_std(net_values)
+        bull_c, bull_s = robust_center_scale([signed_log_mm(v) for v in bull_values])
+        bear_c, bear_s = robust_center_scale([signed_log_mm(v) for v in bear_values])
+        net_c, net_s = robust_center_scale([signed_log_mm(v) for v in net_values])
         for row in rows:
             bull = row.get("bullish_flow_score")
             bear = row.get("bearish_flow_score")
             net = (bull - bear) if (bull is not None and bear is not None) else None
-            row["bullish_z"] = zscore(bull, bull_mean, bull_std)
-            row["bearish_z"] = zscore(bear, bear_mean, bear_std)
-            row["net_bias_z"] = zscore(net, net_mean, net_std)
-            row["bullish_pct"] = pct_rank([r.get("bullish_flow_score") for r in rows], bull)
-            row["bearish_pct"] = pct_rank([r.get("bearish_flow_score") for r in rows], bear)
+            row["bullish_z"] = robust_zscore(signed_log_mm(bull), bull_c, bull_s)
+            row["bearish_z"] = robust_zscore(signed_log_mm(bear), bear_c, bear_s)
+            row["net_bias_z"] = robust_zscore(signed_log_mm(net), net_c, net_s)
+            row["bullish_pct"] = pct_rank(bull_values, bull)
+            row["bearish_pct"] = pct_rank(bear_values, bear)
             row["net_bias_pct"] = pct_rank(net_values, net)
     return results
 
@@ -1176,8 +1204,19 @@ def self_test() -> dict[str, Any]:
         checks += 1
         payload = signal_payload(result)
         assert set(payload) == {
-            "ticker", "signal_date", "current_price", "total_call_premium", "total_put_premium", "call_put_premium_ratio", "unusual_call_count", "unusual_put_count", "extreme_trade_count", "max_unusualness_score", "avg_unusualness_score", "bullish_flow_score", "bearish_flow_score", "hedging_flow_score", "net_option_flow_bias", "dominant_structure", "top_contracts", "option_flow_summary", "jlaw_source_row", "unusual_premium", "net_directional_premium", "directional_confidence", "bias_strength", "iv_rising_unusual_count"
+            "ticker", "signal_date", "current_price", "total_call_premium", "total_put_premium", "call_put_premium_ratio", "unusual_call_count", "unusual_put_count", "extreme_trade_count", "max_unusualness_score", "avg_unusualness_score", "bullish_flow_score", "bearish_flow_score", "hedging_flow_score", "net_option_flow_bias", "dominant_structure", "top_contracts", "option_flow_summary", "jlaw_source_row", "unusual_premium", "net_directional_premium", "directional_confidence", "bias_strength", "iv_rising_unusual_count",
+            "bullish_z", "bearish_z", "net_bias_z", "bullish_pct", "bearish_pct", "net_bias_pct",
         }
+        checks += 1
+        # Robust z: one outlier must not drag the rest of the cross-section negative.
+        day = [{"signal_date": "2026-10-28", "bullish_flow_score": float(b), "bearish_flow_score": 0.0}
+               for b in (448e6, 5e6, 4e6, 3e6, 2e6, 1e6, 0.0)]
+        apply_cross_sectional_scores(day)
+        zs = [row["net_bias_z"] for row in day]
+        assert zs[3] == 0.0 and zs[1] > 0 and zs[-1] < 0 and zs[0] == max(zs)
+        assert abs(zs[1]) < 2.0  # the outlier does not crush the rest of the cross-section
+        checks += 1
+        assert [row["net_bias_pct"] for row in day][0] == 100.0 and day[-1]["net_bias_pct"] == 0.0
         checks += 1
     return {"ok": True, "self_test": "passed", "checks": checks, "model_version": MODEL_VERSION}
 

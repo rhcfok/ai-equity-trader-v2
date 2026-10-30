@@ -42,6 +42,7 @@ DP_DATE = ""
 RUN_ID = uuid.uuid4().hex
 NOW_ISO = datetime.now(timezone.utc).isoformat()
 LOGGED = 0
+FLOW_CONFLICT_Z = -1.0  # robust net_bias_z at/below which bullish structures get FLOW_CONFLICT
 
 
 def load_env(dotenv_path: str | None = None) -> dict[str, str]:
@@ -174,7 +175,9 @@ def opportunity_row(candidate: dict, strategy: str, short: dict, long: dict | No
     cautions = []
     if candidate["verdict"] == "mixed":
         cautions.append("VERDICT_MIXED")
-    if (candidate.get("net_bias_z") or 0) < 0:
+    # net_bias_z is a robust (signed-log, median/MAD) z since 2026-10-29: the median
+    # name sits at 0, so only a meaningful bearish tilt (z <= -1) counts as a conflict.
+    if (candidate.get("net_bias_z") or 0) <= FLOW_CONFLICT_Z:
         cautions.append("FLOW_CONFLICT")
     if ann < 20:
         cautions.append("ANNUALIZED_BELOW_20")

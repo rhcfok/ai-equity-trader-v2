@@ -14,6 +14,12 @@ module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
+def test_self_test() -> None:
+    result = module.self_test()
+    assert result["ok"] is True
+    assert result["checks"] >= 12
+
+
 if __name__ == "__main__":
     result = module.self_test()
     assert result["ok"] is True

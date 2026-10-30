@@ -115,6 +115,11 @@ create table if not exists public."uw-option-opportunities" (
     bullish_z               double precision,
     bearish_z               double precision,
     net_bias_z              double precision,
+    flow_alert_count        integer,
+    flow_composite          double precision,
+    flow_label              text,
+    flow_conflicts          jsonb not null default '[]'::jsonb,
+    flow_components         jsonb not null default '{}'::jsonb,
 
     jlaw_run_date           date,
     jlaw_classification     text,
@@ -200,3 +205,11 @@ drop trigger if exists uw_opt_opp_updated_at_trg on public."uw-option-opportunit
 create trigger uw_opt_opp_updated_at_trg
     before update on public."uw-option-opportunities"
     for each row execute function public.uw_opt_opp_set_updated_at();
+
+-- 2026-10-29 migration (add_uw_opp_flow_composite): combined unusual-flow score columns
+alter table public."uw-option-opportunities"
+  add column if not exists flow_alert_count integer,
+  add column if not exists flow_composite double precision,
+  add column if not exists flow_label text,
+  add column if not exists flow_conflicts jsonb not null default '[]'::jsonb,
+  add column if not exists flow_components jsonb not null default '{}'::jsonb;

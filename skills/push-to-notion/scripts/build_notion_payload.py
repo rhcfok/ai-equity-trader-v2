@@ -1,30 +1,44 @@
 """Build a Notion-page payload (JSON on stdout) from Supabase trading data.
 
 Surfaces:
-  gex     -> "GEX Daily Briefing — <date> <HH:MM> HKT" page: A→Z GEX map +
-             strategy guidance table matching the established Notion briefing
-             format (watchlist categories from the `watchlist` table, strike
-             ladders from gex_snapshot.gamma_ladder, credit-spread guidance).
-  quant2  -> "quant2 Leaderboard — <date>" page matching the established
-             Kimi-published format: summary line (as-of, holdout, validation,
-             validated candidates, probability status), factual day notes,
-             Top-25 table, group summary, research-only disclaimer.
+  gex      -> "GEX Daily Briefing — <date> <HH:MM> HKT" page: A→Z GEX map +
+              strategy guidance table matching the established Notion briefing
+              format (watchlist categories from the `watchlist` table, strike
+              ladders from gex_snapshot.gamma_ladder, credit-spread guidance).
+  quant2   -> "quant2 Leaderboard — <date>" page matching the established
+              Kimi-published format: summary line (as-of, holdout, validation,
+              validated candidates, probability status), factual day notes,
+              Top-25 table, group summary, research-only disclaimer.
+  briefing -> dated 交易决策简报 toggle appended to the page "J Law 双管线 ×
+              Unusual Whales 期权流 — 交易决策简报" (id 3f5b8852cf008035916dd12b
+              ae2a3dd2). Source is the LOCAL briefing markdown produced by the
+              daily-trading-briefing skill (out/briefing_<date>.md by default):
+              the first H1 becomes the toggle title (📊 prefix), markdown pipe
+              tables are converted to <table header-row="true"> syntax, and the
+              body is wrapped in <toggle>...</toggle>. No Supabase read, no
+              credentials needed.
 
-The script only READS Supabase (PostgREST, stdlib urllib). The agent publishes
-the returned payload to Notion via the Notion plugin (OAuth); no Notion token
-belongs here. Credentials: env SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY,
-fallback a .env file (keys supabase_url / supabase_service_role, either case).
+The script only READS Supabase (PostgREST, stdlib urllib) — and only for the
+gex/quant2 surfaces. The agent publishes the returned payload to Notion via the
+Notion plugin (OAuth); no Notion token belongs here. Credentials: env
+SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY, fallback a .env file (keys
+supabase_url / supabase_service_role, either case).
 
 Usage:
-  python build_notion_payload.py gex    [--date YYYY-MM-DD] [--max-rows N]
-  python build_notion_payload.py quant2 [--date YYYY-MM-DD] [--max-rows N]
+  python build_notion_payload.py gex      [--date YYYY-MM-DD] [--max-rows N]
+  python build_notion_payload.py quant2   [--date YYYY-MM-DD] [--max-rows N]
+  python build_notion_payload.py briefing [--date YYYY-MM-DD] [--file PATH]
+                                          [--title "override title"]
 
 For gex, --max-rows defaults to 0 (all watchlist symbols), matching the
-established A→Z briefing. For quant2 it defaults to 25 (Top-25 table).
+established A→Z briefing. For quant2 it defaults to 25 (Top-25 table). For
+briefing, --file defaults to out/briefing_<date>.md under the cwd and --title
+defaults to the briefing file's first H1 line with a 📊 prefix.
 """
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -43,6 +57,13 @@ SURFACES = {
         "parent_path": "ai-trader-v2-kimi/quant2",
         "title_fmt": "quant2 Leaderboard — {date}",
         "icon": "📈",
+    },
+    "briefing": {
+        # Not a child-page archive: a dated <toggle> on the fixed briefing page.
+        "target_page_id": "3f5b8852cf008035916dd12bae2a3dd2",
+        "parent_path": "ai-trader-v2-kimi (toggle on the briefing page itself)",
+        "title_fmt": "📊 交易决策简报 {date}",
+        "icon": "📊",
     },
 }
 
@@ -432,6 +453,89 @@ def build_quant2(base, key, max_rows):
     return rows, "\n".join(lines), []
 
 
+# ------------------------------------------------------------ briefing surface
+
+_MD_TABLE_ROW = re.compile(r"^\s*\|(.+)\|\s*$")
+_MD_TABLE_SEP = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+
+def _cell(s):
+    """Sanitize one table cell for <td> output (pipes would break nothing in
+    <td> syntax but read badly after Notion storage — normalize them away)."""
+    s = s.strip().replace("|", "/").replace("$", "\\$").replace("<", "\\<")
+    if s.startswith("**") and s.endswith("**") and len(s) > 4:
+        s = f"<b>{s[2:-2]}</b>"
+    return s
+
+
+def _line_escape(s):
+    """Escape text lines outside tables so Notion does not eat $ as math or
+    stray < as HTML. Headings/bold/quotes/dividers pass through untouched."""
+    return s.replace("$", "\\$").replace("<", "\\<")
+
+
+def _is_table_sep(line):
+    return bool(_MD_TABLE_SEP.match(line))
+
+
+def briefing_to_notion_toggle(md_text, title):
+    """Convert a briefing markdown file to one canonical Notion <toggle>.
+
+    - drops the leading H1 (it becomes the toggle title, 📊-prefixed)
+    - converts markdown pipe tables to <table header-row="true"><tr><td> rows
+    - escapes $ and < outside tables
+    - wraps everything in <toggle> ... </toggle> (title line, blank, body)
+    """
+    lines = md_text.replace("\r\n", "\n").split("\n")
+    # Drop the first H1 if present (its text is the toggle title).
+    for i, ln in enumerate(lines):
+        if ln.startswith("# "):
+            lines = lines[:i] + lines[i + 1:]
+            break
+    out = ["<toggle>", title, ""]
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if _MD_TABLE_ROW.match(line) and not _is_table_sep(line):
+            # Collect the table block.
+            block = []
+            while i < n and _MD_TABLE_ROW.match(lines[i]):
+                block.append(lines[i])
+                i += 1
+            rows = [r for r in block if not _is_table_sep(r)]
+            out.append('')
+            out.append('<table header-row="true">')
+            for r in rows:
+                cells = [c for c in r.strip().strip("|").split("|")]
+                out.append("<tr>" + "".join(f"<td>{_cell(c)}</td>" for c in cells) + "</tr>")
+            out.append("</table>")
+            out.append("")
+            continue
+        out.append(_line_escape(line))
+        i += 1
+    # Trim leading blank lines left by the removed H1.
+    while out and out[3:4] and out[3].strip() == "":
+        out.pop(3)
+    out.append("</toggle>")
+    return "\n".join(out)
+
+
+def build_briefing(md_path, title_override, date):
+    path = Path(md_path)
+    if not path.is_file():
+        raise RuntimeError(f"briefing file not found: {md_path} (run the "
+                           f"daily-trading-briefing workflow first, or pass --file)")
+    text = path.read_text(encoding="utf-8")
+    m = re.search(r"^# (.+)$", text, flags=re.MULTILINE)
+    title = title_override or ("📊 " + m.group(1).strip() if m else f"📊 交易决策简报 {date}")
+    markdown = briefing_to_notion_toggle(text, title)
+    warnings = []
+    if "<table" not in markdown and "|" in text:
+        warnings.append("source contained pipes but no table was converted — check output")
+    return title, markdown, warnings
+
+
 # -------------------------------------------------------------------- main
 
 def main():
@@ -444,10 +548,42 @@ def main():
                     help="fallback .env path (default: .env in cwd)")
     ap.add_argument("--max-rows", type=int, default=None,
                     help="table row cap; 0 = all (default: 0 for gex, 25 for quant2)")
+    ap.add_argument("--file", default=None,
+                    help="briefing surface: path to briefing_<date>.md "
+                         "(default: out/briefing_<date>.md under cwd)")
+    ap.add_argument("--title", default=None,
+                    help="briefing surface: override the toggle title "
+                         "(default: first H1 of the file, 📊-prefixed)")
     args = ap.parse_args()
     max_rows = args.max_rows
     if max_rows is None:
         max_rows = 0 if args.surface == "gex" else 25
+
+    if args.surface == "briefing":
+        md_path = args.file or f"out/briefing_{args.date}.md"
+        title, markdown, warnings = build_briefing(md_path, args.title, args.date)
+        payload = {
+            "surface": "briefing",
+            "target_page_id": SURFACES["briefing"]["target_page_id"],
+            "mode": "toggle",  # append/replace ONE dated toggle on the target page
+            "parent_path": SURFACES["briefing"]["parent_path"],
+            "title": title,
+            "icon": SURFACES["briefing"]["icon"],
+            "publish_date": args.date,
+            "briefing_file": md_path,
+            "warnings": warnings,
+            # Publish gate: the daily-trading-briefing skill requires this to
+            # exit 0 on the source file before anything reaches Notion.
+            "check_command": (
+                "python skills/daily-trading-briefing/scripts/flow_reconcile.py "
+                f"--date {args.date} --check-board {md_path} --strict"
+            ),
+            "markdown": markdown,
+        }
+        json.dump(payload, sys.stdout, ensure_ascii=False, indent=2)
+        print()
+        log(f"OK: {title} — toggle body {len(markdown)} chars from {md_path}")
+        return
 
     base, key = load_credentials(args.env_file)
     if not base or not key:

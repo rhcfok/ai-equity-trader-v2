@@ -3,7 +3,12 @@
 Two modes:
 
 1. From a local daily verdict JSON (the SKILL.md output artifact):
-   python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_2026-10-16.json
+   python scripts/upsert_flow_verdict_rows.py --json flow_verdicts_2026-10-16.json \
+       [--stats flow_alert_stats_2026-10-16.json]
+
+   With --stats (or a flow_alert_stats_<date>.json next to the verdict JSON) the
+   uncapped premium stats from scripts/flow_alert_stats.py are merged into each
+   row (alert_count_total, premium_tilt, verdict_quant, verdict_agree, ...).
 
 2. From Supabase itself (backfill / re-sync of existing blob rows):
    python scripts/upsert_flow_verdict_rows.py --pull-from-supabase [--latest N]
@@ -100,13 +105,35 @@ def rows_from_payload(payload: dict, default_date: str | None = None) -> tuple[s
     return date, rows
 
 
+def merge_stats(rows: list[dict], stats_by_symbol: dict[str, dict]) -> int:
+    """Merge flow_alert_stats columns into verdict rows in place; returns rows merged."""
+    from flow_alert_stats import STAT_COLUMNS, verdict_agrees  # lazy: avoids a circular import
+
+    merged = 0
+    for row in rows:
+        stats = stats_by_symbol.get(row["symbol"])
+        if not stats:
+            continue
+        for col in STAT_COLUMNS:
+            row[col] = stats.get(col)
+        row["verdict_agree"] = verdict_agrees(row.get("verdict"), stats.get("verdict_quant"))
+        merged += 1
+    return merged
+
+
 def upsert_rows(base: str, key: str, rows: list[dict]) -> None:
     if not rows:
         print("No rows to upsert.")
         return
-    response = request_with_retry("POST", f"{base}/{ROWS_TABLE}", headers(key), json=rows)
-    if response.status_code not in (200, 201, 204):
-        sys.exit(f"Supabase upsert failed (HTTP {response.status_code}): {response.text[:500]}")
+    # PostgREST bulk upserts need uniform keys; rows with and without merged stats
+    # go in separate batches so missing stats never null out existing ones.
+    batches: dict[tuple, list[dict]] = {}
+    for row in rows:
+        batches.setdefault(tuple(sorted(row)), []).append(row)
+    for batch in batches.values():
+        response = request_with_retry("POST", f"{base}/{ROWS_TABLE}", headers(key), json=batch)
+        if response.status_code not in (200, 201, 204):
+            sys.exit(f"Supabase upsert failed (HTTP {response.status_code}): {response.text[:500]}")
     print(f"Upserted {len(rows)} rows into {ROWS_TABLE}.")
 
 
@@ -115,6 +142,7 @@ def main() -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--json", help="Local daily verdict JSON (flow_verdicts_<date>.json).")
     source.add_argument("--pull-from-supabase", action="store_true", help="Read existing flow-verdicts blob rows and unpack them all.")
+    parser.add_argument("--stats", help="flow_alert_stats_<date>.json to merge (default: auto-detect next to --json).")
     parser.add_argument("--latest", type=int, default=0, help="With --pull-from-supabase: only the N most recent blob rows (0 = all).")
     args = parser.parse_args()
 
@@ -132,6 +160,13 @@ def main() -> int:
             sys.exit(f"Could not read {args.json}: {type(exc).__name__}.")
         date, rows = rows_from_payload(payload)
         print(f"{args.json}: verdict_date={date or '??'} rows={len(rows)}")
+        stats_path = args.stats or os.path.join(os.path.dirname(os.path.abspath(args.json)), f"flow_alert_stats_{date}.json")
+        if os.path.exists(stats_path):
+            stats_doc = json.loads(open(stats_path, encoding="utf-8").read())
+            merged = merge_stats(rows, {k.upper(): v for k, v in (stats_doc.get("stats") or {}).items()})
+            print(f"Merged flow_alert_stats for {merged}/{len(rows)} rows from {stats_path}")
+        elif args.stats:
+            sys.exit(f"--stats file not found: {args.stats}")
         upsert_rows(base, key, rows)
         total += len(rows)
     else:
