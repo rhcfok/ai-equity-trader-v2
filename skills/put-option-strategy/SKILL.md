@@ -40,7 +40,7 @@ An adverse near-strike flow observation caps the score at 69 and must be shown a
 ## Workflow
 
 1. Anchor the report to the most recent completed US market session. Label all source dates and quote timestamps.
-2. Resolve requested US watchlist names and their latest J Law, Quant2, and stored GEX context. Retain Valid and Watch; record Skip/non-US exclusions in the audit.
+2. Resolve requested US watchlist names and their latest J Law, Quant2, and stored GEX context. Retain Valid and Watch; record Skip/non-US exclusions in the audit. By default the screen covers the **full US-listed Valid/Watch pool** (200+ names, growing with the watchlist); pass `--max-symbols N` only to intentionally cap the universe.
 3. Pull the canonical Unusual Whales contract chain for each surviving ticker. A broad screener is discovery-only and cannot establish absence of contracts.
 4. Retrieve earnings, OI GEX, IV term structure, and flow/OI context. Treat earnings overlap as a hard reject and flow/OI as a scored caution only.
 5. Construct CSPs and 10-point BPSs from NBBO; use short bid and long ask, never last or theoretical prices.
@@ -68,7 +68,7 @@ python3 scripts/csp_bps_opportunity_runner.py \
   --output-dir /home/ubuntu/output/put_option_YYYY-MM-DD
 ```
 
-The default accepts Watch. Use `--valid-only` only when intentionally restricting the universe.
+The default accepts Watch. Use `--valid-only` only when intentionally restricting the universe. The default `--max-symbols 1000` screens the entire US-listed Valid/Watch pool; runtime scales with the number of Unusual Whales chain calls (a full-pool run takes several minutes).
 
 Log the board after review:
 
