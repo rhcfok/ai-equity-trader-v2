@@ -183,10 +183,10 @@ def preferred_jlaw(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if not symbol:
             continue
         prior = output.get(symbol)
-        sort_key = (str(row.get("run_date") or ""), int(str(row.get("jlaw_review_type") == "chart")), int(row.get("id") or 0))
+        sort_key = (str(row.get("run_date") or ""), int(row.get("jlaw_review_type") == "chart"), int(row.get("id") or 0))
         prior_key = (
             str(prior.get("run_date") or ""),
-            int(str(prior.get("jlaw_review_type") == "chart")),
+            int(prior.get("jlaw_review_type") == "chart"),
             int(prior.get("id") or 0),
         ) if prior else ("", 0, 0)
         if prior is None or sort_key > prior_key:
@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-open-interest", type=int, default=100, help="Per-leg minimum OI. Default: 100.")
     parser.add_argument("--max-bid-ask-spread-pct", type=float, default=0.25, help="Maximum NBBO width/midpoint. Default: 0.25.")
     parser.add_argument("--top-n", type=int, default=20, help="Maximum number of hard-pass structures to publish, ranked across CSP and BPS. Default: 20.")
-    parser.add_argument("--max-symbols", type=int, default=25, help="Maximum US underlyings to query. Default: 25.")
+    parser.add_argument("--max-symbols", type=int, default=1000, help="Maximum US underlyings to query. Default: 1000 (effectively the full Valid/Watch pool; pass a smaller number to cap).")
     parser.add_argument("--exit-nonzero-on-provider-errors", action="store_true", help="Return non-zero when one or more chain requests fail.")
     return parser
 
