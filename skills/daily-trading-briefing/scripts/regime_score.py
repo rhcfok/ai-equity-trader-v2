@@ -98,8 +98,8 @@ PLAYBOOK: dict[str, dict[str, Any]] = {
         "tier_b_size_mult": 0.5,
         "new_longs": "A tier only; B on trigger at half size",
         "income_strategies": ["WHEEL_CSP", "BULL_PUT_SPREAD", "WHEEL_CC", "BEAR_CALL_SPREAD"],
-        "naked_csp": "core only",
-        "csp_dte_max": 30,
+        "naked_csp": "core + satellite + watch1 + watch2 + watch3",
+        "csp_dte_max": 35,
         "credit_at_risk_pct_nlv": 2.0,
     },
     "CAUTIOUS": {

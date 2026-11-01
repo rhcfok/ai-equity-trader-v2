@@ -5,7 +5,7 @@ description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_
 
 # daily-trading-briefing：每日交易决策简报
 
-把 jlaw 双管线结果与期权流判读整合成一份可直接挂单执行的双语简报。
+把 J Law 双管线结果与期权流判读整合成中英双语、研究用途的交易决策简报；只生成条件性人工计划，绝不创建、传送或提交订单。
 
 ## 输入与上游依赖
 
@@ -13,6 +13,7 @@ description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_
 - Supabase `trade-jlaw-v2`：当日 `yahoo` 行 + 最新 `chart` 行（chart 常滞后一天，属正常；10-10 起已修复 null/错位问题）。
 - **flow verdict**：从 Supabase 交接表 `"flow-verdicts"` 读取（由 agent B / UW-option-breakout 写入）。本机工作区的 `flow_verdicts_<date>.json` 只是本地缓存，不是权威来源。
 - 自行拉数可用 `UW-option-breakout/scripts/pull_jlaw.py`。
+- **ORATS（首选期权链）**：当需要合约、NBBO、OI、IV、expiry/DTE 或期权事件数据时，用已配置 ORATS API 作为主数据源；UW 与 Supabase 保留为流向、暗池、GEX 和历史来源账本的补充证据。期权板只接受已确认在美国交易所上市的标的；无法证明 U.S. exchange 的标的一律排除。
 - **市场脆弱度仪表盘 Market Fragility Dashboard**：`https://vincizh.github.io/market-fragility-dashboard/`（每日 ~07:19 UTC 更新，运行时可能读到前一日快照——引用页面上的 as-of 日期）。作为 Regime 段的跨检输入，见 Step 3。
 
 ### Step 0 — 签收 flow verdict（agent A 侧校验规则）
@@ -40,6 +41,7 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --o
 
 - chart 侧：classification = **Valid** 全部 + score ≥ 12 的 Watch
 - yahoo 侧：score ≥ 10 的 Watch（yahoo 很少出 Valid；**零 Valid 本身是市况信号**）
+- 仅保留已确认在美国交易所上市的标的；非美国交易所、exchange 缺失或无法核验的标的不进入方向性或期权收入候选池。
 - 标记**双管线一致**的标的（两边都正面），权重上调
 - 每个候选记录：symbol、score、current_price、pivot/entry、stop、stop_pct、rrr、target_price、vcp_stage、classification、来源管线
 - 同一标的 chart 与 yahoo 参数不一致时，**止损取 chart 侧**（通常更紧；案例：AMT chart stop 176 vs yahoo 158.7）
@@ -92,7 +94,7 @@ python skills/daily-trading-briefing/scripts/regime_score.py \
 |---|---|---:|---:|---|---|---:|---:|
 | ≥ 70 | RISK_ON 进攻 | ×1.0 | ×1.0 | 全部 | 全类别 | 45d | 3.0% NLV |
 | 55–70 | CONSTRUCTIVE 建设性 | ×1.0 | ×0.75 | CSP / BPS / Diagonal / CC | core + satellite | 39d | 2.5% |
-| 45–55 | NEUTRAL 中性 | ×0.6 | ×0.5 | CSP / BPS / CC / BCS | 仅 core | 30d | 2.0% |
+| 45–55 | NEUTRAL 中性 | ×0.6 | ×0.5 | CSP / BPS / CC / BCS | core + satellite + watch1 + watch2 + watch3 | 35d | 2.0% |
 | 30–45 | CAUTIOUS 谨慎 | ×0.5 | 0 | BPS / CC / BCS（仅定义风险） | 不新开 | 21d | 1.25% |
 | < 30 | DEFENSIVE 防守 | ×0.25 | 0 | CC / BCS | 不新开 | 14d | 0.5% |
 
@@ -136,16 +138,36 @@ python skills/daily-trading-briefing/scripts/regime_score.py \
 
 **格式要求：中英双语**。章节标题双语（如 `## 2. A 级：三重确认 | Tier A: Triple-Confirmed`）；表格表头双语（`触发 Trigger`）；长段落中文一行、英文一行对照。
 
-1. 写 `briefing_<date>.md` 到工作区（覆盖当日旧版），结构：Regime（`regime_<date>.md` + 脆弱度要点）→ A 级（参数表）→ B 级（汇总表）→ 回避/冲突（含原因）→ 执行要点 → 数据来源
-2. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。**2026-10-21 起解析器弃用 `<details>/<summary>`**（与 `<table>` 组合会被拒绝："bare <tr> is not valid"）——改用规范 `<toggle>` 语法：`<toggle>` 首行为标题（如 `📊 交易决策简报 <date> Trading Decision Briefing — ...`），随后空行，正文，`</toggle>`。当日重跑时用 `update_content` 定点替换**仅当日**的 toggle 内容（old_str 从当日 `notion-fetch` 原样复制；存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格；优先用无格式纯文本尾锚定位）；解析失败回退：先插最小探针 toggle，fetch 读其序列化形式再定点展开。历史日期的折叠块保留不动
-3. **发布前标签核对（必做，先于第 2 步 Notion 同步）**：
+1. 先运行 `scripts/build_daily_trading_plan_v2.py` 生成本地审阅版（只读 Supabase，无 Notion / Supabase 写入）：
+
+```bash
+export SUPABASE_SERVICE_ROLE_KEY="$SUPABASE_KEY"  # 仅当 session 已授权且只用于本地审阅
+python skills/daily-trading-briefing/scripts/build_daily_trading_plan_v2.py \
+  --date <date> --out <output-dir> \
+  --regime-json <output-dir>/regime_<date>.json \
+  --reconcile-json <output-dir>/flow_reconcile_<date>.json \
+  --fragility-notes <output-dir>/fragility_dashboard_source.md \
+  [--income-board-markdown <output-dir>/part4_weekly_20_contract_board.md]
+```
+
+该 builder 同时保存选取字段的 source snapshot。市场关闭或 ORATS 合约链无法在同一决策时点验证时，必须让 income board fail closed，不得把历史 `live` 标记当作当前报价。
+当有同一收盘时点、ORATS 验证的 NBBO 板时，先用 `scripts/render_weekly_income_board.py --manifest <board.json> --out <part4.md>` 校验 20 张总数、10 张 SP/CSP/WHEEL_CSP vs 10 张 BPS/BCS、每标的 ≤2、DTE、bid/ask、spread 最大亏损、CSP collateral 和 U.S.-exchange 资格，再把输出作为 `--income-board-markdown` 传入。默认报告只显示已选的 Top 20；完整 Davis / CSP-BPS / UW / ORATS 来源行保留在 source snapshot，只有审阅明确需要时才传 `--retain-income-ledgers` 附到报告。renderer 和 builder 都只生成本地审阅文件，不创建订单。
+2. 复制 `templates/daily_trading_plan_v2.md` 到 `briefing_<date>.md` 并替换占位符。固定结构：Part 1 Regime scorecard / inputs / playbook → Part 2 intelligence + data freshness + canonical reconciliation / conflict register / cross-evidence → Part 3 directional Tier plan → Part 4 options-income board → Part 5 data gaps → Part 6 execution rules → sources. 每个市场依赖数字必须带 session/as-of；区分 report date、market session、source as-of、generated time。
+3. Part 2 是唯一的完整对账和冲突登记册：新鲜度只引用 `flow_reconcile_<date>.json`，确认/冲突/部分数必须加总至 universe。Part 3 只能引用 Part 2 的确认与冲突，不得把 conflict 标的写成干净单向结论。Part 5 只写控制结论或每个真实缺口的影响与抑制动作，绝不复制前一日的手写 stale claim。
+4. Part 4 只在同一 decision timestamp 已验证 U.S.-listed underlying、ORATS NBBO、expiry、DTE、earnings、合约条款与来源时填写；`est`、board mark、live quote 必须分开，若无合格报价则明确写“income board withheld”。先写带 as-of 的持仓语境与分诊优先级；存量持仓信用与新提案信用分开，不可把未经验证的 CC/diagonal/roll 算进预算。只显示每周按置信度选出的 **20 张合约**（可在同一 ticket 写 qty），每标的最多 2 张，**SP/CSP/WHEEL_CSP 10 张 vs BPS/BCS 10 张（50:50）**；SP/CSP/WHEEL_CSP ≤35d、BPS/BCS <45d。显示策略、合约腿、DTE、报价时点、每张与合计 gross credit、CSP collateral / spread 最大风险与 ROC、置信度文字、冲突/重叠、来源和开仓前验证。未来 **4 个重筛周**每行必须明确：催化剂、存量/收入动作、命名的 post-print re-strike queue、仅当条件与 veto、允许结构/配比、以及 credit 是否计入；不得只写泛化“re-screen”。周度规划范围是 $5–6k gross credit；四个独立重建周的可核算规划为 $20–24k gross credit。绝不为了凑周目标而延长 DTE、增加同标的、推断 CC 持仓或绕开 veto。绝不把该板当作系统可执行订单。
+5. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。**2026-10-21 起解析器弃用 `<details>/<summary>`**（与 `<table>` 组合会被拒绝："bare <tr> is not valid"）——改用规范 `<toggle>` 语法：`<toggle>` 首行为标题（如 `📊 交易决策简报 <date> Trading Decision Briefing — ...`），随后空行，正文，`</toggle>`。当日重跑时用 `update_content` 定点替换**仅当日**的 toggle 内容（old_str 从当日 `notion-fetch` 原样复制；存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格；优先用无格式纯文本尾锚定位）；解析失败回退：先插最小探针 toggle，fetch 读其序列化形式再定点展开。历史日期的折叠块保留不动
+6. **发布前标签核对（必做，先于第 5 步 Notion 同步）**：
 
 ```bash
 python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --check-board briefing_<date>.md --strict
 ```
 
 退出码 1 = 简报中有标签与 `flow_verdict_rows` 不符（如 10-29 PANW 写 "bullish verdict" 实为 mixed、CAT 写 "verdict 待核" 实为 mixed）或把新鲜表写成 stale。逐条修正后重跑至 0 再同步 Notion。
-4. 回复用户给精简表格版 + 文件链接 + "研究分析非投资建议"
+7. 回复用户给精简表格版 + 文件链接 + "研究分析非投资建议"
+
+### 自动化执行 | Scheduled run
+
+当用户要求固定时点运行时，使用 Manus ScheduleTask，不使用驻留 shell cron。当前已批准的默认节奏为工作日 15:30 `Asia/Hong_Kong`（六字段 cron：`0 30 15 * * 1-5`）。每次触发必须以最近完成的美国市场 session 为 report date，重新运行数据签收、regime、对账、ORATS 合约核验、Top-20 renderer 和 strict board check；不得复用旧报价或旧候选。Notion 只添加新的当日顶层 `<toggle>`，或定点替换同一 report date 的 toggle；历史块绝不改动。数据不完整、ORATS 报价/事件无法验证或 strict check 失败时，保守发布并明确 withheld 项，不发布未经核验的收入板。
 
 ## 已知坑
 
@@ -156,6 +178,7 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --c
 - 曾见数据源错价疑点（如 NOW 现价 140.86 异常），发现后在简报中标注
 - Notion 表格必须用 `<table>` 增强 Markdown 语法，不能用标准 markdown 表格
 - **Notion 解析器 2026-10-21 变更**：`<details>/<summary>` 已弃用（自动转 `<toggle>`），与 `<table>` 组合直接报错 "bare <tr> is not valid"；一律写 `<toggle>`（标题在首行 + 空行 + 正文）。页面存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格——update_content 的 old_str 须原样复制；优先用纯文本尾锚（句尾无格式片段）定位
+- ORATS 是当前合约板的首选链源，不可把 UW/Supabase 历史账本当作当日 NBBO；任何 U.S.-exchange 资格、NBBO、DTE、OI、earnings 或合约条款无法验证的标的必须跳过或让收入板 fail closed。
 - `regime_score.py` 依赖 Yahoo chart API（与 jlaw-yahoo-runner 相同），偶发 429 会自动重试；SPY 未出当日收盘时按 SPY 日期对齐（VIX 当日值不会被提前使用）
 - `option_flow_symbol_signals.net_bias_z` 2026-10-29 起为 robust z（signed-log 溢价 + median/MAD，±5 截断），历史行已回填；旧版 mean/stdev z 会被单一异常值（MU +6.66）压扁全体——跨日比较以回填后数值为准
 - `trade-stldc-v2` 2026-10-27 起覆盖从 67 扩至 257 只，比例类指标不受影响，但跨期比较绝对数无意义
@@ -167,29 +190,29 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --c
 
 ---
 
-## Part 3 · 期权收入计划 | OPTIONS INCOME PLAN（v4 收入规则 income rules，2026-10-28 用户确认生效 / effective next run）
+## Part 4 · 期权收入计划 | OPTIONS INCOME PLAN（v4 收入规则 income rules，2026-11-01 用户确认生效 / effective next run）
 
-> 本节为 Part 3 收入计划的权威规则（source of truth）；cron 提示词引用本节。*This section is the source of truth for the income plan; the cron prompt references it.*
+> 本节为 Part 4 收入计划的权威规则（source of truth）；ScheduleTask runbook 引用本节。*This section is the source of truth for the income plan; the scheduled-task runbook references it.*
 
-- **目标 Target**：**$20-30k/月 ≈ $7-8k/周 credit**（70-80% 来自 credit）。达成路径：①裸 put 账本修复释放保证金；②BPS/BCS 定义风险乘数；③11-20/12-18 月度 IV 溢价层；④CC 存量收益（另列，见硬规则 2）。*Path: repair the naked-put book, defined-risk multi-leg scaling, monthly IV layers; CC income tracked separately.*
+- **目标 Target**：通常 **$5-6k/周 gross-credit 规划**，四个独立重建周对应 **$20-24k/月**。$20-30k 是更宽的月度 ambition，只有额外收入在当时点重新验证后才可计入；不是收益、利润或达标承诺。达成路径：①合规的 short-put/CSP/WHEEL_CSP；②BPS/BCS 定义风险乘数；③在每周重新验证后使用合适的月度 IV 层。*The target is a gross-credit planning range, not a return or profit promise.*
 
 ### 3.0-A DTE 规则 | DTE rules
-- **CSP / short call / strangle：DTE ≤ 20 天**。
-- **Credit Spread（BPS/BCS）：DTE < 35 天**（月度 IV 溢价可用 / monthly IV premium allowed）。
+- **SP / CSP / WHEEL_CSP：DTE ≤ 35 天**（2026-11-01 用户更新）；**short call / strangle：DTE ≤ 20 天**。
+- **Credit Spread（BPS/BCS）：DTE < 45 天**（月度 IV 溢价可用 / monthly IV premium allowed）。
 - 月度到期（11-20/12-18 型）仅用于 spread / diagonal 空腿；短腿到期清标的财报 ≥2 天；**FOMC / 巨头发报夜不加新裸 gamma**（BPS/BCS 定义风险可做）。
-- 超限例外（>20 DTE 的 CSP/strangle）：三重背书（技术 + dp 干净/吸筹 + GEX put wall 在 strike 上方）**加 Rijnberk 估值锚（CSP strike ≤ equity_valuation 的 buy_below / fair_value）**。*Exceptions need triple backing plus the Rijnberk valuation anchor.*
+- 超限例外（>35 DTE 的 SP/CSP/WHEEL_CSP 或 ≥45 DTE 的 BPS/BCS）：不允许列入本板；重筛更近到期日，不得以目标 credit 作为例外理由。*No duration exceptions are permitted for this board.*
 
 ### 3.0-B 提案板 | Proposal board（每周 20 张合约 20 contracts/week）
-- 每周提案 **20 张合约**；**同一标的同时最多 2 张（same ticker ≤2）**；20 张合计 credit **≈ $7-8k/周**。
-- 来源叠加 source stack：option-davis / csp-bps (manus) / uw-option-opportunities 板 + **Tier B 方向确认提案**（Part 1' chart+flow 确认标的）+ **估值锚 CSP（Rijnberk `equity_valuation` × GEX put wall；CSP strike ≤ buy_below / fair_value）**。
-- **每张合约必须携带：置信度 Confidence（高 High / 中 Medium / 低 Low）+ 一行理由 rationale**。评级 rubric：
+- 每周提案 **20 张合约**；**同一标的同时最多 2 张（same ticker ≤2）**；**SP/CSP/WHEEL_CSP 10 张 vs BPS/BCS 10 张（50:50）**。四个独立重建周的 base gross-credit 规划为 **$20–24k/月**（每周 **$5–6k**）；$30k 不得预先假设，且不能为凑数放宽 DTE、NBBO、earnings、dark-pool、flow 或集中度硬规则。
+- 来源叠加 source stack：**ORATS 当日 U.S.-listed contract/NBBO/OI/IV/expiry 数据优先**，再叠加 option-davis / csp-bps (manus) / uw-option-opportunities 历史板、**Tier B 方向确认提案**（Part 1' chart+flow 确认标的）和 **估值锚 CSP（Rijnberk `equity_valuation` × GEX put wall；CSP strike ≤ buy_below / fair_value）**。没有 ORATS 当日验证，不得将历史合同列为可开仓 ticket。
+- **只列被选中的最高置信度 20 张，不在用户报告重复全量来源清单**；原始来源字段保存在 local source snapshot。每张合约必须携带：置信度 Confidence（高 High / 中 Medium / 低 Low）+ 一行理由 rationale。评级 rubric：
   - **高 High**：verdict bullish/确认 ≥2 日 + dp 干净或吸筹 + 板排名靠前或估值锚；
   - **中 Medium**：单日确认 / mixed 但 dp 支持 / alerts 5-20；
   - **低 Low**：样本 <5 alerts、贴线门槛、疑似数据（RRR 0 / stop <1%）→ **Low 为可跳过 optional/skippable**。
-- **硬规则 Hard rules**：① 同一标的 ≤2 张；② **现有持仓的 covered call 不入提案**（持仓管理收益，另列 tracked separately）；③ dp 重度派发（buy%<25 且 net<−$100M）否决做多与卖 put；④ FOMC / 发报夜不加裸 gamma；⑤ 防御 regime 下 short strangle 否决（只做指数 iron condor）；⑥ 疑似数据行（RRR 0 / stop <1%）不挂单。
+- **硬规则 Hard rules**：① 只使用 U.S.-listed / U.S.-exchange 标的且同一标的 ≤2 张；② **现有持仓的 covered call 不入提案**（持仓管理收益，另列 tracked separately）；③ dp 重度派发（buy%<25 且 net<−$100M）否决做多与卖 put；④ FOMC / 发报夜不加裸 gamma；⑤ 防御 regime 下 short strangle 否决（只做指数 iron condor）；⑥ 疑似数据行（RRR 0 / stop <1%）不挂单。
 
 ### Post-print re-strike queue（财报后重设 strike 队列）
 每次财报后：dp 复核 → CSP/BPS 按 post-print GEX wall 与 Rijnberk 估值锚重设 strike；dp 派发名单维持否决；verdict 翻转的名单先进观察再恢复。*After each print: dp re-check → re-strike anchored to post-print GEX wall and valuation; distribution names stay vetoed; flipped verdicts re-enter via watch.*
 
 ### 周度预算与节奏 | Weekly budget & cadence
-20 张合约合计 **≈ $7-8k/周 credit**；月度 ≈ **$20-30k**（含 11-20/12-18 月度 IV 层与滚仓 credit）。节奏：周一建板（核对 marks）→ 周中事件前停手 → 周四按决议/发报刷新加层 → 周五到期/滚仓。防守：2x credit 或短腿 touch 即撤；21 DTE / 2x credit 管存量；任一失效触发（tide 连续深流出 / NDX 破 55DMA×3 / SOXX 破 500×2 / LPI>60）→ 停新开仓。*Build Monday → stand down before events → layer Thursday → expire/roll Friday; defense rules as listed.*
+20 张合约的 gross-credit 规划为 **$5-6k/周**；四个独立重建周可对应 **$20-24k** gross credit。$30k 上沿只能由后续经重新验证的额外收入（例如合规滚仓或新板）形成，不能写入未验证的本周板；这不是预期利润。报告必须包含未来 **4 个作战周**：日期、事件催化剂、存量/收入动作、post-print re-strike queue、only-if / veto、允许结构与配比、以及 credit 计入方式。节奏：周一建板（核对 marks）→ 周中事件前停手 → 周四按决议/发报刷新加层 → 周五到期/滚仓。防守：2x credit 或短腿 touch 即撤；21 DTE / 2x credit 管存量；任一失效触发（tide 连续深流出 / NDX 破 55DMA×3 / SOXX 破 500×2 / LPI>60）→ 停新开仓。*Build Monday → stand down before events → layer Thursday → expire/roll Friday; defense rules as listed.*
