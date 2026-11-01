@@ -27,7 +27,7 @@ Key design guarantees:
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 import json
 import math
@@ -38,6 +38,7 @@ import statistics
 import sys
 import time
 from typing import Any, Callable, Iterable
+import unicodedata
 
 import requests
 
@@ -45,6 +46,11 @@ import requests
 UW_BASE_URL = "https://api.unusualwhales.com"
 UW_CLIENT_API_ID = "100001"
 OCC_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d{8})$")
+EXCLUDED_WATCHLIST_CATEGORY = "euro"
+LEGACY_WATCHLIST_CATEGORY_PRIORITY = {"core": 0, "satellite": 1, "watch1": 2}
+US_OPTION_EXCHANGES: frozenset[str] = frozenset({"NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "BATS", "CBOE"})
+WATCHLIST_PAGE_SIZE = 1000
+MAX_WATCHLIST_PAGES = 10000
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +93,7 @@ class UWVolatilityContext:
 @dataclass
 class SymbolSignalBundle:
     symbol: str
-    watchlist_category: str = "core"
+    watchlist_category: str = ""
     spot_price: float | None = None
     quote_as_of: str | None = None
     quote_status: str = "live"
@@ -234,6 +240,25 @@ def is_us_option_symbol(symbol: str) -> bool:
     if "." in s or ":" in s or s.isdigit():
         return False
     return bool(re.match(r"^[A-Z]{1,6}$", s))
+
+
+def normalize_watchlist_category(value: Any) -> str:
+    """Return the canonical category text used by the all-non-euro policy."""
+    if value is None:
+        return ""
+    return unicodedata.normalize("NFKC", str(value)).strip().casefold()
+
+
+def is_eligible_watchlist_category(value: Any) -> bool:
+    """Accept nonblank canonical categories except the exact excluded category."""
+    category = normalize_watchlist_category(value)
+    return bool(category) and category != EXCLUDED_WATCHLIST_CATEGORY
+
+
+def _watchlist_category_sort_key(category: str) -> tuple[int, str]:
+    """Rank legacy tiers first, then deterministically order future categories."""
+    legacy_rank = LEGACY_WATCHLIST_CATEGORY_PRIORITY.get(category)
+    return (legacy_rank if legacy_rank is not None else len(LEGACY_WATCHLIST_CATEGORY_PRIORITY), category)
 
 
 # ---------------------------------------------------------------------------
@@ -1144,8 +1169,10 @@ def generate_opportunities_for_symbol(
       5. DIAGONAL_SPREAD (60-95 DTE 0.70-0.82Δ long call + 7-21 DTE 0.20-0.30Δ short call in low IV)
       6. BEAR_CALL_SPREAD (Bearish flow + DP distribution call credit spread)
     """
-    if not is_us_option_symbol(bundle.symbol):
+    category = normalize_watchlist_category(bundle.watchlist_category)
+    if not is_us_option_symbol(bundle.symbol) or not is_eligible_watchlist_category(category):
         return []
+    bundle = replace(bundle, watchlist_category=category)
     spot = bundle.spot_price
     if not spot or spot <= 0 or not contracts:
         return []
@@ -1182,8 +1209,7 @@ def generate_opportunities_for_symbol(
     # 1. WHEEL_CSP (CORE 25-39 DTE & TACTICAL 3-10 DTE)
     # ------------------------------------------------------------------
     wheel_csp_regime_ok = (
-        bundle.watchlist_category in {"core", "satellite", "watch1"}
-        and jlaw_cls in {"valid", "watch"}
+        jlaw_cls in {"valid", "watch"}
         and verdict in {"bullish", "mixed"}
         and val.wheel_fundamental_ok
         and ivr >= 25.0
@@ -1297,8 +1323,7 @@ def generate_opportunities_for_symbol(
     # ------------------------------------------------------------------
     reasons_joined = " ".join(bundle.verdict_reasons or []).lower()
     wheel_cc_regime_ok = (
-        bundle.watchlist_category in {"core", "satellite"}
-        and ivr >= 20.0
+        ivr >= 20.0
         and safety_ceiling is not None
         and (
             rsi >= 60.0
@@ -2145,9 +2170,26 @@ def render_markdown_report(
 # ---------------------------------------------------------------------------
 
 
-WATCHLIST_CATEGORIES: tuple[str, ...] = ("core", "satellite", "watch1")
-US_OPTION_EXCHANGES: frozenset[str] = frozenset({"NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "BATS", "CBOE"})
-_CATEGORY_PRIORITY = {c: i for i, c in enumerate(WATCHLIST_CATEGORIES)}
+def fetch_watchlist_rows(sb: SupabaseRestClient) -> list[dict[str, Any]]:
+    """Read the complete watchlist in stable, bounded PostgREST pages."""
+    rows: list[dict[str, Any]] = []
+    for page_number in range(MAX_WATCHLIST_PAGES):
+        offset = page_number * WATCHLIST_PAGE_SIZE
+        page = sb.select(
+            "watchlist",
+            params={
+                "select": "symbol,category,exchange",
+                "order": "symbol.asc,category.asc,exchange.asc",
+                "limit": str(WATCHLIST_PAGE_SIZE),
+                "offset": str(offset),
+            },
+        )
+        if not isinstance(page, list):
+            break
+        rows.extend(row for row in page if isinstance(row, dict))
+        if len(page) < WATCHLIST_PAGE_SIZE:
+            break
+    return rows
 
 
 def build_watchlist_universe(
@@ -2156,32 +2198,32 @@ def build_watchlist_universe(
 ) -> list[tuple[str, str]]:
     """
     Builds the scan universe strictly from `public.watchlist`:
-      - Only `category` in {core, satellite, watch1} (case/whitespace-insensitive).
-      - Only US-listed exchanges (drops LSE / OTC / Stockholm / XETR, e.g. BESIY, IQE.L).
-      - De-duplicates symbols, keeping the highest-priority category (core > satellite > watch1).
+      - Includes every nonblank category except canonical `euro` (Unicode NFKC, trim, casefold).
+      - Only US option-listed exchanges; blank or missing exchanges are excluded.
+      - De-duplicates symbols, keeping core > satellite > watch1, then lexical category order.
       - `symbol_override` (from --symbols) can only NARROW this universe; tickers that are not
-        in core/satellite/watch1 are ignored.
+        eligible non-euro, US-option-listed watchlist symbols are ignored.
     Never reads holding/hedge columns (only symbol, category, exchange are selected).
     """
     best: dict[str, str] = {}
     for row in watchlist_rows or []:
         sym = str(row.get("symbol") or "").strip().upper()
-        cat = str(row.get("category") or "").strip().lower()
-        exch = str(row.get("exchange") or "").strip().upper()
-        if cat not in _CATEGORY_PRIORITY:
+        cat = normalize_watchlist_category(row.get("category"))
+        exch = unicodedata.normalize("NFKC", str(row.get("exchange") or "")).strip().upper()
+        if not is_eligible_watchlist_category(cat):
             continue
-        if exch and exch not in US_OPTION_EXCHANGES:
+        if exch not in US_OPTION_EXCHANGES:
             continue
         if not is_us_option_symbol(sym):
             continue
-        if sym not in best or _CATEGORY_PRIORITY[cat] < _CATEGORY_PRIORITY[best[sym]]:
+        if sym not in best or _watchlist_category_sort_key(cat) < _watchlist_category_sort_key(best[sym]):
             best[sym] = cat
 
     if symbol_override:
         wanted = {s.strip().upper() for s in symbol_override if s and s.strip()}
         best = {s: c for s, c in best.items() if s in wanted}
 
-    return sorted(best.items(), key=lambda kv: (_CATEGORY_PRIORITY[kv[1]], kv[0]))
+    return sorted(best.items(), key=lambda kv: (*_watchlist_category_sort_key(kv[1]), kv[0]))
 
 
 def us_market_date() -> date:
@@ -2200,7 +2242,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--symbols",
         default="",
-        help="Optional comma-separated subset (e.g. NVDA,AVGO). Only tickers already in core/satellite/watch1 are scanned.",
+        help="Optional comma-separated subset (e.g. NVDA,AVGO). Only eligible non-euro, US-option-listed watchlist tickers are scanned.",
     )
     p.add_argument("--min-score", type=float, default=60.0, help="Minimum confidence score to publish (default 60)")
     p.add_argument("--top-n", type=int, default=20, help="Max ranked opportunities to publish (default 20)")
@@ -2229,24 +2271,18 @@ def main(argv: list[str] | None = None) -> int:
     sb = SupabaseRestClient(url=sb_url, key=sb_key) if (sb_url and sb_key) else None
     run_id = f"uw-income-{report_date.isoformat()}-{int(time.time())}"
 
-    # Universe = Supabase watchlist, restricted to core / satellite / watch1 (US-listed only)
+    # Universe = all non-euro, US-option-listed Supabase watchlist symbols (client-side policy).
     if sb is None:
         print(
             "ERROR: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required; the universe is "
-            "loaded from public.watchlist (core/satellite/watch1).",
+            "loaded from all non-euro, US-option-listed public.watchlist symbols.",
             file=sys.stderr,
         )
         return 2
-    wl_rows = sb.select(
-        "watchlist",
-        params={
-            "select": "symbol,category,exchange",
-            "category": f"in.({','.join(WATCHLIST_CATEGORIES)})",
-        },
-    )
+    wl_rows = fetch_watchlist_rows(sb)
     override = [s for s in args.symbols.split(",") if s.strip()] if args.symbols else None
     symbols = build_watchlist_universe(wl_rows, override)
-    print(f"Universe: {len(symbols)} watchlist symbols ({', '.join(WATCHLIST_CATEGORIES)})")
+    print(f"Universe: {len(symbols)} all non-euro, US-option-listed watchlist symbols")
 
     # Prefetch recent unusual-flow signals once for the whole universe (persistence leg)
     flow_hist_by_sym: dict[str, list[dict[str, Any]]] = {}

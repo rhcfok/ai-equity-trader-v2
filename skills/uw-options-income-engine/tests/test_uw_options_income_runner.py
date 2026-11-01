@@ -2,7 +2,7 @@
 Offline unit tests for uw_options_income_runner.py (no network, no credentials).
 
 Run:
-    python -m pytest skills/uw-options-income-engine/tests -q
+    python3 skills/uw-options-income-engine/tests/test_uw_options_income_runner.py
 """
 
 from __future__ import annotations
@@ -310,6 +310,16 @@ def test_wheel_csp_tactical_bucket():
     assert len(tac) == 1
 
 
+def test_wheel_csp_routes_allowed_watch2_category():
+    b = base_bundle(watchlist_category=" Watch2 ")
+    chain = [q("ABC", EXP_32, "P", 93.0, 1.85, 1.95, -0.24)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    csp = [x for x in rows if x["strategy"] == "WHEEL_CSP"]
+    assert len(csp) == 1
+    assert b.watchlist_category == " Watch2 "
+    assert csp[0]["watchlist_category"] == "watch2"
+
+
 def test_bull_put_spread_adaptive_width_and_delta_cap():
     b = base_bundle()
     chain = [
@@ -396,6 +406,16 @@ def test_wheel_cc_is_stateless_and_at_or_above_ceiling():
     assert not hasattr(b, "position")
 
 
+def test_wheel_cc_routes_allowed_unknown_category():
+    b = base_bundle(watchlist_category="Future-Tier", verdict="mixed")
+    b.volatility.rsi_14 = 65.0
+    chain = [q("ABC", EXP_21, "C", 112.0, 0.95, 1.00, 0.22)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    cc = [x for x in rows if x["strategy"] == "WHEEL_CC"]
+    assert len(cc) == 1
+    assert cc[0]["watchlist_category"] == "future-tier"
+
+
 def test_bear_call_spread_on_bearish_distribution():
     b = base_bundle(verdict="bearish", dp_accumulating=False, bearish_z=1.6)
     chain = [
@@ -432,6 +452,12 @@ def test_opportunity_key_is_deterministic():
 def test_non_us_symbol_skipped():
     b = base_bundle(symbol="0700.HK")
     assert r.generate_opportunities_for_symbol(TODAY, "t", b, [q("ABC", EXP_32, "P", 93.0, 1.85, 1.95, -0.24)], []) == []
+
+
+def test_direct_euro_category_produces_no_opportunity():
+    b = base_bundle(watchlist_category=" Ｅｕｒｏ ")
+    chain = [q("ABC", EXP_32, "P", 93.0, 1.85, 1.95, -0.24)]
+    assert r.generate_opportunities_for_symbol(TODAY, "t", b, chain, []) == []
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +561,7 @@ def test_runner_never_reads_holdings():
 
 
 # ---------------------------------------------------------------------------
-# Watchlist universe (core / satellite / watch1 only)
+# Watchlist universe (all non-euro US-option-listed categories)
 # ---------------------------------------------------------------------------
 
 
@@ -544,32 +570,119 @@ WL_ROWS = [
     {"symbol": "avgo ", "category": " Satellite", "exchange": "NASDAQ"},
     {"symbol": "TSM", "category": "watch1", "exchange": "NYSE"},
     {"symbol": "SPY", "category": "core", "exchange": "AMEX"},
-    {"symbol": "PLTR", "category": "watch2", "exchange": "NASDAQ"},
-    {"symbol": "RKLB", "category": "watch3", "exchange": "NASDAQ"},
-    {"symbol": "SAP", "category": "euro", "exchange": "XETR"},
+    {"symbol": "AMD", "category": "watch1", "exchange": "NASDAQ"},
+    {"symbol": "PLTR", "category": " watch2 ", "exchange": "NASDAQ"},
+    {"symbol": "RKLB", "category": "WATCH3", "exchange": "NASDAQ"},
+    {"symbol": "FUTR", "category": "Future_Tier", "exchange": "BATS"},
+    {"symbol": "SAP", "category": " Euro ", "exchange": "NASDAQ"},
+    {"symbol": "ASML", "category": "Ｅｕｒｏ", "exchange": "NYSE"},
     {"symbol": "BESIY", "category": "watch1", "exchange": "OTC"},
-    {"symbol": "IQE.L", "category": "watch1", "exchange": "LSE"},
-    {"symbol": "SIVE.ST", "category": "watch1", "exchange": "Stockholm"},
+    {"symbol": "LSECO", "category": "watch2", "exchange": "LSE"},
+    {"symbol": "STOCK", "category": "watch3", "exchange": "Stockholm"},
+    {"symbol": "XETRA", "category": "future", "exchange": "XETR"},
+    {"symbol": "NOCAT", "category": None, "exchange": "NASDAQ"},
+    {"symbol": "BLANKCAT", "category": "  ", "exchange": "NYSE"},
+    {"symbol": "NOEX", "category": "watch2", "exchange": ""},
+    {"symbol": "MISSINGEX", "category": "watch3"},
+    {"symbol": "TSM", "category": "euro", "exchange": "NASDAQ"},  # must not suppress eligible duplicate
     {"symbol": "TSM", "category": "core", "exchange": "NYSE"},  # duplicate -> keep core
 ]
 
 
-def test_universe_limited_to_core_satellite_watch1_us_listed():
+def test_category_policy_is_canonical_and_rejects_only_blank_or_euro():
+    assert r.normalize_watchlist_category(" Ｅｕｒｏ ") == "euro"
+    assert not r.is_eligible_watchlist_category(None)
+    assert not r.is_eligible_watchlist_category("  ")
+    assert not r.is_eligible_watchlist_category(" Euro ")
+    assert r.is_eligible_watchlist_category("watch2")
+    assert r.is_eligible_watchlist_category("future-tier")
+
+
+def test_universe_includes_all_non_euro_us_listed_categories():
     u = r.build_watchlist_universe(WL_ROWS)
-    assert u == [("NVDA", "core"), ("SPY", "core"), ("TSM", "core"), ("AVGO", "satellite")]
+    assert u == [
+        ("NVDA", "core"), ("SPY", "core"), ("TSM", "core"), ("AVGO", "satellite"),
+        ("AMD", "watch1"), ("FUTR", "future_tier"), ("PLTR", "watch2"), ("RKLB", "watch3"),
+    ]
     syms = {s for s, _ in u}
-    assert not syms & {"PLTR", "RKLB", "SAP", "BESIY", "IQE.L", "SIVE.ST"}
+    assert {"PLTR", "RKLB", "FUTR"} <= syms
+    assert not syms & {
+        "SAP", "ASML", "BESIY", "LSECO", "STOCK", "XETRA", "NOCAT", "BLANKCAT", "NOEX", "MISSINGEX",
+    }
+
+
+def test_universe_dedup_is_legacy_priority_then_lexical_and_input_order_independent():
+    rows = [
+        {"symbol": "LEGACY", "category": "watch1", "exchange": "NASDAQ"},
+        {"symbol": "LEGACY", "category": "satellite", "exchange": "NASDAQ"},
+        {"symbol": "LEGACY", "category": "core", "exchange": "NASDAQ"},
+        {"symbol": "FALLBK", "category": "zeta", "exchange": "NYSE"},
+        {"symbol": "FALLBK", "category": "alpha", "exchange": "NYSE"},
+        {"symbol": "ELIGIB", "category": "euro", "exchange": "NASDAQ"},
+        {"symbol": "ELIGIB", "category": "core", "exchange": "LSE"},
+        {"symbol": "ELIGIB", "category": "watch3", "exchange": "NASDAQ"},
+    ]
+    expected = [("LEGACY", "core"), ("FALLBK", "alpha"), ("ELIGIB", "watch3")]
+    assert r.build_watchlist_universe(rows) == expected
+    assert r.build_watchlist_universe(list(reversed(rows))) == expected
 
 
 def test_symbol_override_can_only_narrow_universe():
-    u = r.build_watchlist_universe(WL_ROWS, ["nvda", "PLTR", "AAPL"])
-    assert u == [("NVDA", "core")]  # PLTR is watch2, AAPL not on watchlist
+    u = r.build_watchlist_universe(WL_ROWS, ["nvda", "FUTR", "PLTR", "SAP", "AAPL"])
+    assert u == [("NVDA", "core"), ("FUTR", "future_tier"), ("PLTR", "watch2")]
 
 
-def test_main_queries_watchlist_with_server_side_category_filter():
-    src = (SCRIPTS_DIR / "uw_options_income_runner.py").read_text(encoding="utf-8")
-    assert '"category": f"in.({\',\'.join(WATCHLIST_CATEGORIES)})"' in src
-    assert r.WATCHLIST_CATEGORIES == ("core", "satellite", "watch1")
+def test_fetch_watchlist_rows_paginates_all_rows_with_stable_parameters():
+    calls = []
+
+    class FakeSupabase:
+        def select(self, table, params=None):
+            calls.append((table, dict(params or {})))
+            if params["offset"] == "0":
+                return [
+                    {"symbol": f"SKIP{i}", "category": "euro", "exchange": "NASDAQ"}
+                    for i in range(r.WATCHLIST_PAGE_SIZE)
+                ]
+            if params["offset"] == str(r.WATCHLIST_PAGE_SIZE):
+                return [{"symbol": "LATE", "category": " Watch3 ", "exchange": "NYSE"}]
+            raise AssertionError(f"unexpected offset: {params['offset']}")
+
+    rows = r.fetch_watchlist_rows(FakeSupabase())
+    assert r.build_watchlist_universe(rows) == [("LATE", "watch3")]
+    assert calls == [
+        (
+            "watchlist",
+            {
+                "select": "symbol,category,exchange",
+                "order": "symbol.asc,category.asc,exchange.asc",
+                "limit": "1000",
+                "offset": "0",
+            },
+        ),
+        (
+            "watchlist",
+            {
+                "select": "symbol,category,exchange",
+                "order": "symbol.asc,category.asc,exchange.asc",
+                "limit": "1000",
+                "offset": "1000",
+            },
+        ),
+    ]
+
+
+def test_fetch_watchlist_rows_stops_after_malformed_response():
+    class FakeSupabase:
+        def __init__(self):
+            self.calls = 0
+
+        def select(self, _table, params=None):
+            self.calls += 1
+            return {"not": "a page"}
+
+    sb = FakeSupabase()
+    assert r.fetch_watchlist_rows(sb) == []
+    assert sb.calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -666,21 +779,6 @@ def test_rows_carry_flow_fields_and_conflict_caution():
     assert "Flow Conflicts" in md
 
 
-class RunnerTestSuite(unittest.TestCase):
-    pass
-
-
-for _name, _fn in list(globals().items()):
-    if _name.startswith("test_") and callable(_fn):
-        setattr(RunnerTestSuite, _name, staticmethod(_fn))
-del _name, _fn
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
-
 # ---------------------------------------------------------------------------
 # Verdict freshness + uncapped alert stats (2026-10-29)
 # ---------------------------------------------------------------------------
@@ -720,3 +818,17 @@ def test_verdict_vs_alert_premium_conflict():
     r.compute_flow_composite(b, date(2026, 10, 29))
     assert "verdict_vs_alert_premium" in b.flow_conflicts
     assert b.flow_components["verdict_quant"] == "bullish"
+
+
+class RunnerTestSuite(unittest.TestCase):
+    pass
+
+
+for _name, _fn in list(globals().items()):
+    if _name.startswith("test_") and callable(_fn):
+        setattr(RunnerTestSuite, _name, staticmethod(_fn))
+del _name, _fn
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

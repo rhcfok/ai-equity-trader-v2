@@ -13,11 +13,11 @@ Read `references/methodology.md` before changing routing gates, valuation tiers,
 
 ## Critical Architectural Rules
 
-0. **Scan Universe = `public.watchlist` core / satellite / watch1 only:**
-   - Query `watchlist?select=symbol,category,exchange&category=in.(core,satellite,watch1)` (server-side filter). Never scan `watch2`, `watch3`, `euro`, or any other category.
-   - Keep only US option-listed exchanges (`NASDAQ`, `NYSE`, `AMEX`/`NYSEARCA`/`ARCA`/`BATS`/`CBOE`); drop LSE / OTC / Stockholm / XETR rows (e.g. `BESIY`, `IQE.L`, `SIVE.ST`).
-   - De-duplicate symbols, keeping the highest-priority category (`core` > `satellite` > `watch1`).
-   - `--symbols` may only **narrow** this universe; tickers outside core/satellite/watch1 are ignored. Supabase credentials are mandatory (the runner exits if they are missing).
+0. **Scan Universe = all eligible `public.watchlist` symbols:**
+   - Query only `watchlist?select=symbol,category,exchange`; enforce category eligibility client-side. Normalize categories with Unicode NFKC, trim, and casefold; reject null/blank values and exact canonical `euro`, while including every other current or future category (including `watch2` and `watch3`).
+   - Keep only US option-listed exchanges (`NASDAQ`, `NYSE`, `AMEX`/`NYSEARCA`/`ARCA`/`BATS`/`CBOE`); drop blank/missing exchanges and LSE / OTC / Stockholm / XETR rows (e.g. `BESIY`, `IQE.L`, `SIVE.ST`).
+   - De-duplicate symbols deterministically: `core` > `satellite` > `watch1`, then lexical canonical category order for all other categories. Retain the canonical category in output rows.
+   - `--symbols` may only **narrow** this eligible all-non-euro, US-option-listed universe; ineligible or absent tickers are ignored. Supabase credentials are mandatory (the runner exits if they are missing).
    - Implemented in `build_watchlist_universe()`; select only `symbol`, `category`, `exchange` (never `position` or `hedge`).
 1. **100% Stateless on Portfolio Holdings:**
    - The runner has **zero visibility into brokerage holdings or `watchlist.position`**.
@@ -48,9 +48,9 @@ Read `references/methodology.md` before changing routing gates, valuation tiers,
 
 | Strategy | Bucket | Target DTE | Delta Band | Regime & Fundamental Triggers | Structural Floor / Ceiling & Economics Gate |
 |---|---|---:|---|---|---|
-| `WHEEL_CSP` | `CORE` | 25–39d (~32d) | `0.18 <= \|Δ\| <= 0.28` | - US-listed `core`, `satellite`, `watch1`<br>- J Law `Valid` or `Watch` (`stop_loss > 0`)<br>- `verdict` in `{"bullish", "mixed"}`<br>- `wheel_fundamental_ok == True` (`uw_ttm_eps > 0`, `uw_valuation_tier` in `{"cheap", "fair_low", "fair_high"}`)<br>- `uw_iv_rank >= 25%`, `uw_term_ratio_7_30 <= 1.25`<br>- `32 <= uw_rsi_14 <= 60` (Davis pullback rule)<br>- `dp_accumulating != False`<br>- `flow_label != "strong_bear"` | - `short_strike <= safety_floor` (`min(jlaw_stop_loss, gex_put_wall, dp_top_level)`)<br>- `annualized_pct >= 20%` at `short_bid`<br>- `strike_adverse_sweeps == 0`<br>- Earnings clear past expiry |
+| `WHEEL_CSP` | `CORE` | 25–39d (~32d) | `0.18 <= \|Δ\| <= 0.28` | - Any eligible all-non-euro, US-option-listed category<br>- J Law `Valid` or `Watch` (`stop_loss > 0`)<br>- `verdict` in `{"bullish", "mixed"}`<br>- `wheel_fundamental_ok == True` (`uw_ttm_eps > 0`, `uw_valuation_tier` in `{"cheap", "fair_low", "fair_high"}`)<br>- `uw_iv_rank >= 25%`, `uw_term_ratio_7_30 <= 1.25`<br>- `32 <= uw_rsi_14 <= 60` (Davis pullback rule)<br>- `dp_accumulating != False`<br>- `flow_label != "strong_bear"` | - `short_strike <= safety_floor` (`min(jlaw_stop_loss, gex_put_wall, dp_top_level)`)<br>- `annualized_pct >= 20%` at `short_bid`<br>- `strike_adverse_sweeps == 0`<br>- Earnings clear past expiry |
 | `WHEEL_CSP` | `TACTICAL` | 3–10d | `0.06 <= \|Δ\| < 0.20` | - Same as `CORE`, plus `uw_term_ratio_7_30 <= 1.18` | - `short_strike <= safety_floor`<br>- `annualized_pct >= 18%`<br>- `strike_adverse_sweeps == 0` |
-| `WHEEL_CC` | `CORE` | 14–35d | `0.16 <= Δ <= 0.28` | - Stateless covered-call reference board for `core` & `satellite`<br>- `uw_rsi_14 >= 60`, OR `covered-call` in verdict reasons, OR `verdict` in `{"mixed", "bearish"}`, OR `flow_label` in `{"bear", "strong_bear"}`<br>- `uw_iv_rank >= 20%` | - `short_strike >= safety_ceiling` (`max(gex_call_wall, jlaw_target_price)` or `spot * 1.04`)<br>- `annualized_pct >= 12%`<br>- `strike_adverse_sweeps == 0`<br>- Earnings clear past expiry |
+| `WHEEL_CC` | `CORE` | 14–35d | `0.16 <= Δ <= 0.28` | - Stateless covered-call reference board for any eligible all-non-euro, US-option-listed category<br>- `uw_rsi_14 >= 60`, OR `covered-call` in verdict reasons, OR `verdict` in `{"mixed", "bearish"}`, OR `flow_label` in `{"bear", "strong_bear"}`<br>- `uw_iv_rank >= 20%` | - `short_strike >= safety_ceiling` (`max(gex_call_wall, jlaw_target_price)` or `spot * 1.04`)<br>- `annualized_pct >= 12%`<br>- `strike_adverse_sweeps == 0`<br>- Earnings clear past expiry |
 | `BULL_PUT_SPREAD` | `CORE` | 14–35d | `0.18 <= \|Δ_short\| <= 0.28` | - J Law `Valid` or `Watch` (`jlaw_score >= 8`)<br>- `verdict` in `{"bullish", "mixed"}`<br>- `uw_iv_rank >= 30%`, `dp_accumulating != False`<br>- `flow_label != "strong_bear"` | - `short_strike <= safety_floor`<br>- Width = **$5** (`spot < $150`) or **$10** (`spot >= $150`)<br>- Strict NBBO `0.20 <= return_on_risk <= 0.35` (`(short_bid - long_ask) / max_loss`)<br>- `strike_adverse_sweeps == 0` |
 | `SHORT_STRANGLE` | `STRANGLE` | 28–45d | `0.12 <= \|Δ_put\|, Δ_call <= 0.20` | - **Positive GEX Pin:** `gex_regime == "positive"`<br>- **High IV:** `uw_iv_rank >= 45%`<br>- **Range-Bound:** `38 <= uw_rsi_14 <= 62` & `verdict` in `{"mixed", "no-data"}` & `\|flow_composite\| < 30`<br>- Corridor `(gex_call_wall - gex_put_wall) / spot >= 8%` | - `short_put_strike <= gex_put_wall` (and `<= dp_top_level` if accumulating)<br>- `short_call_strike >= gex_call_wall`<br>- `annualized_pct >= 18%` on 20% BPR approximation<br>- Zero adverse sweeps on both legs |
 | `DIAGONAL_SPREAD` | `DIAGONAL` | Back: 60–95d<br>Front: 7–21d | Back: `0.70–0.82Δ`<br>Front: `0.20–0.30Δ` | - **Low-IV Bullish Breakout:** J Law `Valid` (or `Watch` with `jlaw_score >= 11`)<br>- `verdict == "bullish"` & `dp_accumulating == True` & `flow_label` in `{"bull", "strong_bull"}` & no `flow_conflicts`<br>- `uw_iv_rank < 38%` & `uw_term_ratio_30_60 <= 1.08` | - Back ITM call extrinsic `<= 25%` of `long_ask`<br>- Front OTM call `>= safety_ceiling`<br>- **No Upside Inversion Gate:** `entry_debit <= 0.78 * (short_strike - long_strike)`<br>- `strike_adverse_sweeps == 0` |
@@ -81,7 +81,7 @@ python3 skills/uw-options-income-engine/scripts/uw_options_income_runner.py \
   --output-dir reports
 ```
 
-- Use `--symbols NVDA,AVGO,META,TSM` to test a subset (only tickers already in core/satellite/watch1 are scanned).
+- Use `--symbols NVDA,AVGO,META,TSM` to test a subset (it can only narrow eligible all-non-euro, US-option-listed watchlist symbols).
 - Use `--dry-run` to generate `reports/uw_options_income_<date>.md` and `.json` without writing to Supabase.
 - Use `--skip-tracking` to skip the open-ledger lifecycle evaluation pass.
 
