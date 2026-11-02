@@ -13,8 +13,14 @@ description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_
 - Supabase `trade-jlaw-v2`：当日 `yahoo` 行 + 最新 `chart` 行（chart 常滞后一天，属正常；10-10 起已修复 null/错位问题）。
 - **flow verdict**：从 Supabase 交接表 `"flow-verdicts"` 读取（由 agent B / UW-option-breakout 写入）。本机工作区的 `flow_verdicts_<date>.json` 只是本地缓存，不是权威来源。
 - 自行拉数可用 `UW-option-breakout/scripts/pull_jlaw.py`。
-- **ORATS（首选期权链）**：当需要合约、NBBO、OI、IV、expiry/DTE 或期权事件数据时，用已配置 ORATS API 作为主数据源；UW 与 Supabase 保留为流向、暗池、GEX 和历史来源账本的补充证据。期权板只接受已确认在美国交易所上市的标的；无法证明 U.S. exchange 的标的一律排除。
 - **市场脆弱度仪表盘 Market Fragility Dashboard**：`https://vincizh.github.io/market-fragility-dashboard/`（每日 ~07:19 UTC 更新，运行时可能读到前一日快照——引用页面上的 as-of 日期）。作为 Regime 段的跨检输入，见 Step 3。
+
+### 期权数据来源优先级 | Options-data source hierarchy
+
+- **Unusual Whales API / MCP 是期权主数据源。** 对每个候选在同一决策时点用它核验 U.S.-listed 标的、期权链、bid/ask（NBBO）、到期日/DTE、IV、OI、GEX、异常期权流、财报与宏观事件；无法证明 U.S. exchange 的标的一律排除。
+- **Supabase 是流程与审计来源。** `flow-verdicts`、normalized flow、dark pool、GEX 快照与 Davis / CSP-BPS / UW opportunities 账本仅用于 reconciliation、历史证据和候选排序；账本 mark 绝不替代新的 UW 报价。
+- **UW 数据不可用或关键字段不完整时 fail closed。** 省略受影响 ticket 或整板暂停；不得改用前一日的账本报价、不得伪造 live quote。
+- **不得将 ORATS 作为默认或硬性门槛。** 只有用户明确要求迁移至 ORATS，且该连接和权限已独立验证时，才可把它列为额外 cross-check；它不阻断既定 UW 工作流。
 
 ### Step 0 — 签收 flow verdict（agent A 侧校验规则）
 
@@ -150,11 +156,11 @@ python skills/daily-trading-briefing/scripts/build_daily_trading_plan_v2.py \
   [--income-board-markdown <output-dir>/part4_weekly_20_contract_board.md]
 ```
 
-该 builder 同时保存选取字段的 source snapshot。市场关闭或 ORATS 合约链无法在同一决策时点验证时，必须让 income board fail closed，不得把历史 `live` 标记当作当前报价。
-当有同一收盘时点、ORATS 验证的 NBBO 板时，先用 `scripts/render_weekly_income_board.py --manifest <board.json> --out <part4.md>` 校验 20 张总数、10 张 SP/CSP/WHEEL_CSP vs 10 张 BPS/BCS、每标的 ≤2、DTE、bid/ask、spread 最大亏损、CSP collateral 和 U.S.-exchange 资格，再把输出作为 `--income-board-markdown` 传入。默认报告只显示已选的 Top 20；完整 Davis / CSP-BPS / UW / ORATS 来源行保留在 source snapshot，只有审阅明确需要时才传 `--retain-income-ledgers` 附到报告。renderer 和 builder 都只生成本地审阅文件，不创建订单。
+该 builder 同时保存选取字段的 source snapshot。市场关闭或 Unusual Whales 合约链无法在同一决策时点验证时，必须让 income board fail closed，不得把历史 `live` 标记当作当前报价。
+当有同一收盘时点、Unusual Whales API 验证的 NBBO 板时，先用 `scripts/render_weekly_income_board.py --manifest <board.json> --out <part4.md>` 校验 20 张总数、10 张 SP/CSP/WHEEL_CSP vs 10 张 BPS/BCS、每标的 ≤2、DTE、bid/ask、spread 最大亏损、CSP collateral 和 U.S.-exchange 资格，再把输出作为 `--income-board-markdown` 传入。默认报告只显示已选的 Top 20；完整 Davis / CSP-BPS / UW 来源行保留在 source snapshot，只有审阅明确需要时才传 `--retain-income-ledgers` 附到报告。renderer 和 builder 都只生成本地审阅文件，不创建订单。
 2. 复制 `templates/daily_trading_plan_v2.md` 到 `briefing_<date>.md` 并替换占位符。固定结构：Part 1 Regime scorecard / inputs / playbook → Part 2 intelligence + data freshness + canonical reconciliation / conflict register / cross-evidence → Part 3 directional Tier plan → Part 4 options-income board → Part 5 data gaps → Part 6 execution rules → sources. 每个市场依赖数字必须带 session/as-of；区分 report date、market session、source as-of、generated time。
 3. Part 2 是唯一的完整对账和冲突登记册：新鲜度只引用 `flow_reconcile_<date>.json`，确认/冲突/部分数必须加总至 universe。Part 3 只能引用 Part 2 的确认与冲突，不得把 conflict 标的写成干净单向结论。Part 5 只写控制结论或每个真实缺口的影响与抑制动作，绝不复制前一日的手写 stale claim。
-4. Part 4 只在同一 decision timestamp 已验证 U.S.-listed underlying、ORATS NBBO、expiry、DTE、earnings、合约条款与来源时填写；`est`、board mark、live quote 必须分开，若无合格报价则明确写“income board withheld”。先写带 as-of 的持仓语境与分诊优先级；存量持仓信用与新提案信用分开，不可把未经验证的 CC/diagonal/roll 算进预算。只显示每周按置信度选出的 **20 张合约**（可在同一 ticket 写 qty），每标的最多 2 张，**SP/CSP/WHEEL_CSP 10 张 vs BPS/BCS 10 张（50:50）**；SP/CSP/WHEEL_CSP ≤35d、BPS/BCS <45d。显示策略、合约腿、DTE、报价时点、每张与合计 gross credit、CSP collateral / spread 最大风险与 ROC、置信度文字、冲突/重叠、来源和开仓前验证。未来 **4 个重筛周**每行必须明确：催化剂、存量/收入动作、命名的 post-print re-strike queue、仅当条件与 veto、允许结构/配比、以及 credit 是否计入；不得只写泛化“re-screen”。周度规划范围是 $5–6k gross credit；四个独立重建周的可核算规划为 $20–24k gross credit。绝不为了凑周目标而延长 DTE、增加同标的、推断 CC 持仓或绕开 veto。绝不把该板当作系统可执行订单。
+4. Part 4 只在同一 decision timestamp 已验证 U.S.-listed underlying、Unusual Whales API NBBO、expiry、DTE、earnings、合约条款与来源时填写；`est`、board mark、live quote 必须分开，若无合格报价则明确写“income board withheld”。先写带 as-of 的持仓语境与分诊优先级；存量持仓信用与新提案信用分开，不可把未经验证的 CC/diagonal/roll 算进预算。只显示每周按置信度选出的 **20 张合约**（可在同一 ticket 写 qty），每标的最多 2 张，**SP/CSP/WHEEL_CSP 10 张 vs BPS/BCS 10 张（50:50）**；SP/CSP/WHEEL_CSP ≤35d、BPS/BCS <45d。显示策略、合约腿、DTE、报价时点、每张与合计 gross credit、CSP collateral / spread 最大风险与 ROC、置信度文字、冲突/重叠、来源和开仓前验证。未来 **4 个重筛周**每行必须明确：催化剂、存量/收入动作、命名的 post-print re-strike queue、仅当条件与 veto、允许结构/配比、以及 credit 是否计入；不得只写泛化“re-screen”。周度规划范围是 $5–6k gross credit；四个独立重建周的可核算规划为 $20–24k gross credit。绝不为了凑周目标而延长 DTE、增加同标的、推断 CC 持仓或绕开 veto。绝不把该板当作系统可执行订单。
 5. **同步 Notion**：页面 `J Law 双管线 × Unusual Whales 期权流 — 交易决策简报`（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`，位于 `ai-trader-v2-kimi` 下）。**2026-10-21 起解析器弃用 `<details>/<summary>`**（与 `<table>` 组合会被拒绝："bare <tr> is not valid"）——改用规范 `<toggle>` 语法：`<toggle>` 首行为标题（如 `📊 交易决策简报 <date> Trading Decision Briefing — ...`），随后空行，正文，`</toggle>`。当日重跑时用 `update_content` 定点替换**仅当日**的 toggle 内容（old_str 从当日 `notion-fetch` 原样复制；存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格；优先用无格式纯文本尾锚定位）；解析失败回退：先插最小探针 toggle，fetch 读其序列化形式再定点展开。历史日期的折叠块保留不动
 6. **发布前标签核对（必做，先于第 5 步 Notion 同步）**：
 
@@ -167,7 +173,7 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --c
 
 ### 自动化执行 | Scheduled run
 
-当用户要求固定时点运行时，使用 Manus ScheduleTask，不使用驻留 shell cron。当前已批准的默认节奏为工作日 15:30 `Asia/Hong_Kong`（六字段 cron：`0 30 15 * * 1-5`）。每次触发必须以最近完成的美国市场 session 为 report date，重新运行数据签收、regime、对账、ORATS 合约核验、Top-20 renderer 和 strict board check；不得复用旧报价或旧候选。Notion 只添加新的当日顶层 `<toggle>`，或定点替换同一 report date 的 toggle；历史块绝不改动。数据不完整、ORATS 报价/事件无法验证或 strict check 失败时，保守发布并明确 withheld 项，不发布未经核验的收入板。
+当用户要求固定时点运行时，使用 Manus ScheduleTask，不使用驻留 shell cron。当前已批准的默认节奏为工作日 15:30 `Asia/Hong_Kong`（六字段 cron：`0 30 15 * * 1-5`）。每次触发必须以最近完成的美国市场 session 为 report date，重新运行数据签收、regime、对账、Unusual Whales 合约核验、Top-20 renderer 和 strict board check；不得复用旧报价或旧候选。Notion 只添加新的当日顶层 `<toggle>`，或定点替换同一 report date 的 toggle；历史块绝不改动。数据不完整、Unusual Whales 报价/事件无法验证或 strict check 失败时，保守发布并明确 withheld 项，不发布未经核验的收入板。
 
 ## 已知坑
 
@@ -178,7 +184,7 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --c
 - 曾见数据源错价疑点（如 NOW 现价 140.86 异常），发现后在简报中标注
 - Notion 表格必须用 `<table>` 增强 Markdown 语法，不能用标准 markdown 表格
 - **Notion 解析器 2026-10-21 变更**：`<details>/<summary>` 已弃用（自动转 `<toggle>`），与 `<table>` 组合直接报错 "bare <tr> is not valid"；一律写 `<toggle>`（标题在首行 + 空行 + 正文）。页面存储序列化为 `<b>` 粗体、`\$`/`\|`/`\<` 转义、多行 `<td>` 单元格——update_content 的 old_str 须原样复制；优先用纯文本尾锚（句尾无格式片段）定位
-- ORATS 是当前合约板的首选链源，不可把 UW/Supabase 历史账本当作当日 NBBO；任何 U.S.-exchange 资格、NBBO、DTE、OI、earnings 或合约条款无法验证的标的必须跳过或让收入板 fail closed。
+- Unusual Whales 是当前合约板的首选链源，不可把 Supabase 历史账本当作当日 NBBO；任何 U.S.-exchange 资格、NBBO、DTE、OI、earnings 或合约条款无法验证的标的必须跳过或让收入板 fail closed。ORATS 仅可在用户明确授权的已验证迁移中作为额外 cross-check，绝不阻断 UW 工作流。
 - `regime_score.py` 依赖 Yahoo chart API（与 jlaw-yahoo-runner 相同），偶发 429 会自动重试；SPY 未出当日收盘时按 SPY 日期对齐（VIX 当日值不会被提前使用）
 - `option_flow_symbol_signals.net_bias_z` 2026-10-29 起为 robust z（signed-log 溢价 + median/MAD，±5 截断），历史行已回填；旧版 mean/stdev z 会被单一异常值（MU +6.66）压扁全体——跨日比较以回填后数值为准
 - `trade-stldc-v2` 2026-10-27 起覆盖从 67 扩至 257 只，比例类指标不受影响，但跨期比较绝对数无意义
@@ -204,7 +210,7 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --c
 
 ### 3.0-B 提案板 | Proposal board（每周 20 张合约 20 contracts/week）
 - 每周提案 **20 张合约**；**同一标的同时最多 2 张（same ticker ≤2）**；**SP/CSP/WHEEL_CSP 10 张 vs BPS/BCS 10 张（50:50）**。四个独立重建周的 base gross-credit 规划为 **$20–24k/月**（每周 **$5–6k**）；$30k 不得预先假设，且不能为凑数放宽 DTE、NBBO、earnings、dark-pool、flow 或集中度硬规则。
-- 来源叠加 source stack：**ORATS 当日 U.S.-listed contract/NBBO/OI/IV/expiry 数据优先**，再叠加 option-davis / csp-bps (manus) / uw-option-opportunities 历史板、**Tier B 方向确认提案**（Part 1' chart+flow 确认标的）和 **估值锚 CSP（Rijnberk `equity_valuation` × GEX put wall；CSP strike ≤ buy_below / fair_value）**。没有 ORATS 当日验证，不得将历史合同列为可开仓 ticket。
+- 来源叠加 source stack：**Unusual Whales API 同一决策时点的 U.S.-listed contract/NBBO/OI/IV/expiry/GEX/event 数据优先**，再叠加 option-davis / csp-bps (manus) / uw-option-opportunities 历史板、**Tier B 方向确认提案**（Part 1' chart+flow 确认标的）和 **估值锚 CSP（Rijnberk `equity_valuation` × GEX put wall；CSP strike ≤ buy_below / fair_value）**。没有 UW 当日完整验证，不得将历史合同列为可开仓 ticket。
 - **只列被选中的最高置信度 20 张，不在用户报告重复全量来源清单**；原始来源字段保存在 local source snapshot。每张合约必须携带：置信度 Confidence（高 High / 中 Medium / 低 Low）+ 一行理由 rationale。评级 rubric：
   - **高 High**：verdict bullish/确认 ≥2 日 + dp 干净或吸筹 + 板排名靠前或估值锚；
   - **中 Medium**：单日确认 / mixed 但 dp 支持 / alerts 5-20；
