@@ -2149,6 +2149,15 @@ WATCHLIST_CATEGORIES: tuple[str, ...] = ("core", "satellite", "watch1")
 US_OPTION_EXCHANGES: frozenset[str] = frozenset({"NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "BATS", "CBOE"})
 _CATEGORY_PRIORITY = {c: i for i, c in enumerate(WATCHLIST_CATEGORIES)}
 
+# Board composition policy: capital-light structures get priority in the published
+# board. Vertical/diagonal spreads (defined-risk or debit-only) must occupy at least
+# SPREAD_MIN_SHARE of the top-N rows; single-leg / covered / strangle structures
+# (full collateral or 20%+ BPR) are capped at the remainder. If spreads are scarce,
+# the board shrinks rather than fabricating setups.
+SPREAD_STRATEGIES: frozenset[str] = frozenset({"BULL_PUT_SPREAD", "BEAR_CALL_SPREAD", "DIAGONAL_SPREAD"})
+SINGLE_STRATEGIES: frozenset[str] = frozenset({"WHEEL_CSP", "WHEEL_CC", "SHORT_STRANGLE"})
+SPREAD_MIN_SHARE: float = 0.6
+
 
 def build_watchlist_universe(
     watchlist_rows: list[dict[str, Any]],
@@ -2288,9 +2297,16 @@ def main(argv: list[str] | None = None) -> int:
 
         # Enrich from Supabase upstream tables when available
         if sb is not None:
+            # trade-jlaw-v2 can hold duplicate rows per (symbol, run_date); tie-break
+            # deterministically on the strongest assessment of the day, else the pick is undefined.
             jlaw = sb.select(
                 "trade-jlaw-v2",
-                params={"select": "*", "symbol": f"eq.{sym}", "order": "run_date.desc", "limit": "1"},
+                params={
+                    "select": "*",
+                    "symbol": f"eq.{sym}",
+                    "order": "run_date.desc,jlaw_score.desc.nullslast,created_at.desc",
+                    "limit": "1",
+                },
             )
             if jlaw:
                 jr = jlaw[0]
@@ -2432,7 +2448,14 @@ def main(argv: list[str] | None = None) -> int:
 
     qualified = [r for r in all_candidates if (r.get("confidence_score") or 0.0) >= args.min_score]
     qualified.sort(key=lambda r: r["confidence_score"], reverse=True)
-    published = qualified[: args.top_n]
+
+    # Composition policy: spreads (BPS/BCS/DIAG) get priority; single-leg structures
+    # (CSP/CC/SS) are capped so they can never exceed (1 - SPREAD_MIN_SHARE) of the board.
+    spreads = [r for r in qualified if r.get("strategy") in SPREAD_STRATEGIES]
+    singles = [r for r in qualified if r.get("strategy") in SINGLE_STRATEGIES]
+    single_cap = int(args.top_n * (1.0 - SPREAD_MIN_SHARE))
+    published = spreads[: args.top_n] + singles[:single_cap]
+    published.sort(key=lambda r: r["confidence_score"], reverse=True)
 
     if sb is not None and not args.dry_run:
         for row in published:
@@ -2443,7 +2466,12 @@ def main(argv: list[str] | None = None) -> int:
     json_path = out_dir / f"uw_options_income_{report_date.isoformat()}.json"
     md_path.write_text(md_text, encoding="utf-8")
     json_path.write_text(json.dumps(published, indent=2), encoding="utf-8")
-    print(f"Wrote {len(published)} qualified opportunities to {md_path} and {json_path}")
+    n_spread = sum(1 for r in published if r.get("strategy") in SPREAD_STRATEGIES)
+    print(
+        f"Wrote {len(published)} qualified opportunities "
+        f"({n_spread} spread / {len(published) - n_spread} single-leg; singles capped at {single_cap}) "
+        f"to {md_path} and {json_path}"
+    )
     return 0
 
 
