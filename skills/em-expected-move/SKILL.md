@@ -94,6 +94,11 @@ PY="D:/AI projects/AI-trading/.venv/Scripts/python.exe"
 # weekly recalibration (full re-download, ~5-10 min, run in background)
 "$PY" -I skills/em-expected-move/scripts/em_backtest.py --refresh
 
+# ad-hoc vertical-spread (BCS/BPS) pricing study — three-layer probabilities,
+# model fair credit, breakeven ladder; works for any ticker incl. off-watchlist
+"$PY" -I skills/em-expected-move/scripts/em_bcs_study.py \
+    --symbol SPY --short 775 --long 785 --expiry 2026-11-20 [--credit 1.50] [--side put]
+
 # offline tests (no network, no Supabase)
 "$PY" skills/em-expected-move/tests/test_em_model.py
 ```
@@ -144,6 +149,8 @@ Join `em-probability` against the workflows' settled lifecycle outcomes
 - `scripts/em_backtest.py` — weekly recalibration CLI.
 - `scripts/em_snapshot.py` — daily snapshot job.
 - `scripts/em_score.py` — daily three-board scoring job.
+- `scripts/em_bcs_study.py` — ad-hoc vertical-spread pricing study CLI
+  (three-layer probabilities, model fair credit, breakeven ladder).
 - `sql/em_model_tables.sql` — idempotent DDL for both tables.
 - `tests/test_em_model.py` — offline unit tests.
 - `scripts/requirements.txt` — Python dependencies.

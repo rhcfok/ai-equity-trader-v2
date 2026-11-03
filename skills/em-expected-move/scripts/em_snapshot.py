@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pandas as pd
 import requests
 
-from em_backtest import download_close, fetch_watchlist
+from em_backtest import download_close, fetch_watchlist, update_recent_bars
 from em_model import DATA_DIR as OUT, MODEL_VERSION, load_creds, sigma50
 
 PROPOSAL_TABLES = ("uw-option-opportunities", "option-opportunity-davis", "csp-bps-opportunity")
@@ -60,6 +60,11 @@ def main() -> None:
     if fresh:
         print(f"Downloading bars for {len(fresh)} new symbols ...")
         closes.update(download_close(fresh, years=5))
+    known = [s for s in wanted if s in closes]
+    if known:
+        print(f"Refreshing recent bars for {len(known)} cached symbols ...")
+        n_upd = update_recent_bars(closes, known)
+        print(f"  extended {n_upd} series with new sessions")
     pd.to_pickle(closes, cache)
 
     cov_path = os.path.join(OUT, "em_coverage_by_ticker.csv")

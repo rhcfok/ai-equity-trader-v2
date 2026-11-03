@@ -16,6 +16,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from em_model import (  # noqa: E402
     Z68,
+    bcs_fair_credit,
+    bs_price,
+    model_delta,
     outside_band112,
     p_profit50_first,
     p_win_expiry,
@@ -88,6 +91,25 @@ check("call just inside 1.12sd -> False",
       not outside_band112(100.0, edge * 0.999, 30, False, sig))
 check("put beyond lower 1.12sd -> True",
       outside_band112(100.0, 100.0 * 100.0 / edge * 0.999, 30, True, sig))
+
+# ---- bs_price / model_delta / bcs_fair_credit ------------------------------
+print("bs_price / model_delta / bcs_fair_credit")
+s0b, kb, hb, sigb = 100.0, 100.0, 30, 0.02
+call = bs_price(s0b, kb, hb, False, sigb)
+put = bs_price(s0b, kb, hb, True, sigb)
+check("put-call parity (r=0): C - P = S0 - K", abs((call - put) - (s0b - kb)) < 1e-9)
+check("call price positive, decreasing in strike",
+      bs_price(100, 90, 30, False, sigb) > call > bs_price(100, 110, 30, False, sigb) > 0)
+check("ATM model |delta| ~ 0.5+ (slightly above)",
+      abs(model_delta(s0b, kb, hb, False, sigb) - phi(0.5 * sigb * math.sqrt(hb))) < 1e-12)
+check("put |delta| = call delta at same strike? (no) put delta < call delta",
+      model_delta(s0b, kb, hb, True, sigb) < model_delta(s0b, kb, hb, False, sigb))
+fc = bcs_fair_credit(100.0, 105.0, 110.0, 30, False, sigb)
+check("call-spread fair credit in (0, width)",
+      0 < fc < 5.0
+      and abs(fc - (bs_price(100, 105, 30, False, sigb) - bs_price(100, 110, 30, False, sigb))) < 1e-12)
+fp = bcs_fair_credit(100.0, 95.0, 90.0, 30, True, sigb)
+check("put-spread fair credit = long P(90) - short P(95) > 0", 0 < fp <= 5.0)
 
 print()
 if failures:

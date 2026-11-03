@@ -126,6 +126,56 @@ def download_close(symbols: list[str], years: int) -> dict[str, pd.Series]:
 # ---------------------------------------------------------------------------
 # Backtest: non-overlapping anchors
 # ---------------------------------------------------------------------------
+def update_recent_bars(closes: dict[str, pd.Series], symbols: list[str],
+                       period: str = "120d") -> int:
+    """Extend cached series with recent bars (daily snapshot maintenance).
+
+    download_close() only fetches symbols missing entirely from the cache;
+    without this the sigma window would freeze at first-build date.
+    Returns the number of series extended/added.
+    """
+    updated = 0
+    for i in range(0, len(symbols), 25):
+        chunk = symbols[i : i + 25]
+        try:
+            df = yf.download(chunk, period=period, interval="1d",
+                             auto_adjust=True, progress=False, threads=False)
+        except Exception as exc:
+            print(f"  warn: tail refresh failed for chunk {chunk[0]}..: {exc}")
+            continue
+        if df is None or df.empty:
+            continue
+        series_by_sym: dict[str, pd.Series] = {}
+        if isinstance(df.columns, pd.MultiIndex):
+            level0 = set(df.columns.get_level_values(0))
+            level1 = set(df.columns.get_level_values(1))
+            if level0 <= {"Open", "High", "Low", "Close", "Volume", "Adj Close"}:
+                for sym in chunk:
+                    if sym in level1:
+                        series_by_sym[sym] = df.xs(sym, axis=1, level=1)["Close"]
+            else:  # (ticker, field) orientation
+                for sym in chunk:
+                    if sym in level0:
+                        series_by_sym[sym] = df[sym]["Close"]
+        else:
+            series_by_sym[chunk[0]] = df["Close"]
+        for sym, s in series_by_sym.items():
+            s = s.dropna().astype(float)
+            if s.empty:
+                continue
+            old = closes.get(sym)
+            if old is None:
+                closes[sym] = s
+                updated += 1
+                continue
+            if str(s.index[-1].date()) <= str(old.index[-1].date()):
+                continue  # cache already current for this symbol
+            merged = pd.concat([old, s])
+            closes[sym] = merged[~merged.index.duplicated(keep="last")].sort_index().astype(float)
+            updated += 1
+    return updated
+
+
 def anchor_rows(close: pd.Series, ticker: str, category: str,
                 lookback: int, horizon: int) -> list[dict]:
     """One observation per non-overlapping anchor (step == horizon)."""

@@ -87,3 +87,31 @@ def outside_band112(s0: float, k: float, h: int, is_put: bool, sigma_d: float) -
     vol_h = sigma_d * math.sqrt(max(1, h))
     edge = s0 * math.exp(Z68 * vol_h)
     return k < s0 * math.exp(-Z68 * vol_h) if is_put else k > edge
+
+
+def model_delta(s0: float, k: float, h: int, is_put: bool, sigma_d: float) -> float:
+    """Driftless (r=0) |delta| of a single option, from the same lognormal."""
+    vol_h = sigma_d * math.sqrt(max(1, h))
+    d1 = (math.log(s0 / k) + 0.5 * vol_h * vol_h) / vol_h
+    return phi(-d1) if is_put else phi(d1)
+
+
+def bs_price(s0: float, k: float, h: int, is_put: bool, sigma_d: float) -> float:
+    """Driftless (r=0) Black-Scholes value of one option on the model lognormal."""
+    vol_h = sigma_d * math.sqrt(max(1, h))
+    d1 = (math.log(s0 / k) + 0.5 * vol_h * vol_h) / vol_h
+    d2 = d1 - vol_h
+    if is_put:
+        return k * phi(-d2) - s0 * phi(-d1)
+    return s0 * phi(d1) - k * phi(d2)
+
+
+def bcs_fair_credit(s0: float, short_k: float, long_k: float, h: int,
+                    is_put: bool, sigma_d: float) -> float:
+    """Model fair net credit (per share) of a vertical spread, realized-vol basis.
+
+    Credit is always short premium minus long premium, both sides:
+    bear call spread: short C(short_k) - long C(long_k);
+    bull put spread:  short P(short_k) - long P(long_k).
+    """
+    return bs_price(s0, short_k, h, is_put, sigma_d) - bs_price(s0, long_k, h, is_put, sigma_d)
