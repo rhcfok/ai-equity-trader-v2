@@ -2203,6 +2203,23 @@ def us_market_date() -> date:
         return (datetime.now(timezone.utc) - timedelta(hours=5)).date()
 
 
+def latest_series_date(rows: list[dict[str, Any]]) -> date | None:
+    """Most recent session date present in a UW daily series (RSI/IV rows).
+
+    The report must be stamped with the session the DATA reflects, not the wall
+    clock: pre-open runs see the prior session's quotes, so an ET-today stamp
+    mislabels the board by one or more trading days.
+    """
+    best: date | None = None
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict):
+            continue
+        d = parse_iso_date(str(r.get("date") or "")[:10])
+        if d and (best is None or d > best):
+            best = d
+    return best
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Stateless UW Multi-Strategy Options Income Engine")
     p.add_argument("--date", default=us_market_date().isoformat(), help="US/Eastern report date (YYYY-MM-DD)")
@@ -2279,10 +2296,21 @@ def main(argv: list[str] | None = None) -> int:
     chain_cache: dict[str, list[OptionContractQuote]] = {}
     spot_cache: dict[str, float] = {}
     gex_cache: dict[str, tuple[float | None, float | None]] = {}
+    session_date_detected = False
     for sym, cat in symbols:
         earnings_rows = uw.get_earnings(sym)
         iv_rows = uw.get_interpolated_iv(sym)  # latest US session
         rsi_rows = uw.get_rsi_14(sym)
+        if not session_date_detected:
+            session_date_detected = True
+            # Stamp the report with the session the DATA reflects, not the run date:
+            # pre-open runs see the prior session's quotes, so an ET-today stamp
+            # mislabels the board by one or more trading days. Explicit --date wins.
+            data_date = latest_series_date(rsi_rows) or latest_series_date(iv_rows)
+            if data_date and args.date == us_market_date().isoformat() and data_date != report_date:
+                report_date = data_date
+                run_id = f"uw-income-{report_date.isoformat()}-{int(time.time())}"
+                print(f"Report date aligned to data session: {report_date.isoformat()}")
         vol_ctx = compute_uw_volatility_context(sym, iv_rows, rsi_rows=rsi_rows)
 
         bundle = SymbolSignalBundle(
