@@ -90,7 +90,9 @@ class Composite(unittest.TestCase):
         self.assertGreater(bull["score"], 65)
         self.assertLess(bear["score"], 30)
         self.assertEqual(bear["band"], "DEFENSIVE")
-        self.assertNotIn("WHEEL_CSP", bear["playbook"]["income_strategies"])
+        self.assertIn("WHEEL_CSP", bear["playbook"]["income_strategies"])
+        self.assertEqual(bear["playbook"]["csp_dte_max"], 35)
+        self.assertEqual(bear["playbook"]["credit_at_risk_pct_nlv"], 0.5)
 
     def test_missing_pillar_reweights(self):
         inp = _inputs()

@@ -116,6 +116,47 @@ def is_us_exchange(value: Any) -> bool:
     return any(token in exchange for token in US_EXCHANGE_TOKENS)
 
 
+STLDC_ROSTER_STAGES = ("BULL-ALERT", "BULL-CONFIRM", "BEAR-ALERT", "BEAR-CONFIRM")
+
+
+def stldc_stage_roster(rows: list[dict[str, Any]], watch_by: dict[str, dict[str, Any]], as_of: str) -> tuple[dict[str, list[str]], list[str]]:
+    """List the full verified US universe, not only Tier A/B; never infer stages."""
+    stages_by: dict[str, set[str]] = defaultdict(set)
+    excluded: set[str] = set()
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        if day(row.get("run_date")) != as_of or not is_us_exchange(watch_by.get(symbol, {}).get("exchange")):
+            excluded.add(symbol)
+            continue
+        stage = str(row.get("stage") or "").strip().upper().replace("_", "-")
+        stages_by[symbol].add(stage)
+    groups: dict[str, list[str]] = {stage: [] for stage in STLDC_ROSTER_STAGES}
+    for symbol, stages in sorted(stages_by.items()):
+        if symbol in excluded or len(stages) != 1 or next(iter(stages)) not in groups:
+            excluded.add(symbol)
+            continue
+        groups[next(iter(stages))].append(symbol)
+    return groups, sorted(excluded)
+
+
+def render_stldc_roster(groups: dict[str, list[str]], excluded: list[str], as_of: str) -> str:
+    lines = [
+        f"<b>STLDC 分组名单 | Stage ticker lists:</b> source trade-stldc-v2; as-of {esc(as_of)}; full verified U.S.-exchange universe, not just Tier A/B.",
+        '<table fit-page-width="true" header-row="true">',
+    ]
+    for cells in (["STLDC 分组 / Stage", "数量 / Count", "全部标的 / All tickers"] , *[
+        [stage, len(groups[stage]), ", ".join(groups[stage]) or "None / 无"] for stage in STLDC_ROSTER_STAGES
+    ]):
+        lines.extend(["<tr>", *[f"<td>{esc(cell)}</td>" for cell in cells], "</tr>"])
+    lines.append("</table>")
+    lines.append("STLDC alert/confirm labels describe technical stages only; they are not option-flow verdicts, reconciliation confirmations, or approved trades. 技术 alert/confirm 不等同期权流或三重确认，不构成开仓批准。")
+    if excluded:
+        lines.append(f"Scope/QA exclusions: {len(excluded)} symbols have an unverified/non-U.S. exchange, a missing/different source date, or ambiguous/unrecognized stage; omitted, not reclassified.")
+    return "\n".join(lines)
+
+
 def option_legs(row: dict[str, Any]) -> str:
     short = row.get("short_option_symbol")
     long = row.get("long_option_symbol") or row.get("leg2_option_symbol")
@@ -183,7 +224,14 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
     flows = get("flow_verdict_rows", select="verdict_date,symbol,verdict,alert_count_total,earnings_block,next_earnings_date,key_flows,updated_at", verdict_date=f"eq.{args.date}", order="symbol.asc", limit="1000")
     handoff = get("flow-verdicts", select="verdict_date,status,rated_count,candidates_total,updated_at,payload", verdict_date=f"eq.{args.date}", limit="1")
     st_date = str(regime["pillars"]["breadth"]["detail"].get("stldc_run_date") or args.date)
-    stldc = get("trade-stldc-v2", select="*", run_date=f"eq.{st_date}", order="symbol.asc", limit="1000")
+    stldc = []
+    offset = 0
+    while True:
+        page = get("trade-stldc-v2", select="run_date,symbol,stage,category,st_dir,ldc_signal", run_date=f"eq.{st_date}", order="symbol.asc,id.asc", limit="500", offset=str(offset))
+        stldc.extend(page)
+        if len(page) < 500:
+            break
+        offset += len(page)
     darkpool = get("darkpool_symbol_daily", select="*", fetch_date=f"eq.{args.date}", order="symbol.asc", limit="1000")
     davis = get("option-opportunity-davis", select="*", report_date=f"eq.{args.date}", order="symbol.asc", limit="100")
     csp_history = get("csp-bps-opportunity", select="*", order="report_date.desc,rank_in_strategy.asc.nullslast,symbol.asc", limit="100")
@@ -219,9 +267,14 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
         elif chart.get("classification") == "Watch" and (score or 0) >= 12 and flow.get("verdict") == "bullish" and rec.get("status") == "confirmed":
             preliminary_b.append((symbol, chart, flow, rec))
 
-    all_symbols = sorted({x[0] for x in preliminary_b} | {str(r.get("symbol") or "").upper() for r in davis + csp_history + uw_history if r.get("symbol")})
-    watchlist = get("watchlist", select="symbol,exchange,category", symbol=f"in.({','.join(all_symbols)})", order="symbol.asc", limit="1000") if all_symbols else []
+    all_symbols = sorted({x[0] for x in preliminary_b} | {str(r.get("symbol") or "").upper() for r in stldc + davis + csp_history + uw_history if r.get("symbol")})
+    watchlist = []
+    for start in range(0, len(all_symbols), 100):
+        symbols = all_symbols[start:start + 100]
+        watchlist.extend(get("watchlist", select="symbol,exchange,category", symbol=f"in.({','.join(symbols)})", order="symbol.asc", limit="1000"))
     watch_by = {str(x.get("symbol") or "").upper(): x for x in watchlist}
+    stldc_groups, stldc_exclusions = stldc_stage_roster(stldc, watch_by, st_date)
+    stldc_roster_markdown = render_stldc_roster(stldc_groups, stldc_exclusions, st_date)
     in_scope = lambda symbol: is_us_exchange((watch_by.get(symbol) or {}).get("exchange"))
     tier_b = sorted([x for x in preliminary_b if in_scope(x[0])], key=lambda x: (-(n(x[1].get("rrr")) or -999), x[0]))
     b_symbols = [x[0] for x in tier_b]
@@ -262,8 +315,9 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
 
     p, tide = regime["pillars"], regime["pillars"]["flow"]["detail"]
     playbook = dict(regime["playbook"])
-    if regime.get("band") == "NEUTRAL":
-        playbook.update({"naked_csp": NEUTRAL_CSP_UNIVERSE, "csp_dte_max": 35})
+    # 2026-11-04 instruction: weak regime changes risk size, not income-family permission.
+    playbook.update({"naked_csp": NEUTRAL_CSP_UNIVERSE + "; individual checks", "csp_dte_max": 35})
+    playbook["income_strategies"] = ["WHEEL_CSP", "WHEEL_CC", "BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"]
     intelligence_row = intelligence[0] if intelligence else {}
     authors = parse_authors(intelligence_row.get("author_sections"))
     note = Path(args.fragility_notes).read_text(encoding="utf-8") if args.fragility_notes else ""
@@ -327,7 +381,10 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
         uw_rows.append(tr([f"UW income / {uw_day}", x.get("symbol"), x.get("strategy"), option_legs(x), f"{day(x.get('short_expiry') or x.get('expiry'))} / stored {x.get('short_dte') or x.get('dte')}d", economics, day(x.get("quote_as_of")), f"{x.get('verdict')}; {x.get('flow_label')}; DP {mm(x.get('dp_net_mm'))}", f"{x.get('score_band')} {num(x.get('confidence_score'),1)}; {shorten(x.get('caution'),120) or 'none'}", disposition]))
 
     source_snapshot = {"retrieved_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "report_date": args.date, "mode": "local_review_only_no_external_writes", "policy_override": {"naked_csp": playbook["naked_csp"], "csp_dte_max": playbook["csp_dte_max"], "note": "2026-11-01 user instruction supersedes prior neutral core-only and shorter-duration text."}, "regime": regime, "reconciliation": reconcile, "jlaw_rows": jlaw, "flow_verdict_rows": flows, "flow_handoff": handoff, "stldc_rows": stldc, "darkpool_rows": darkpool, "normalized_unusual_rows": unusual, "watchlist_us_scope": watchlist, "option_davis_rows": davis, "csp_bps_rows": csp_history, "uw_income_rows": uw_history, "intelligence": intelligence, "income_board_markdown": str(Path(args.income_board_markdown).resolve()) if args.income_board_markdown else None}
+    source_snapshot["stldc_stage_roster"] = {"as_of": st_date, "groups": stldc_groups, "excluded_symbols": stldc_exclusions, "scope": "verified U.S.-exchange universe"}
     snapshot = output / f"daily_trading_plan_v2_{args.date}_source_snapshot.json"
+    source_snapshot["policy_override"]["note"] = "2026-11-04 user instruction: no blanket weak-regime CSP/SP block; CSP<=35d; soft6/4/10 EM-ranked board. Deterministic regime math unchanged."
+    source_snapshot["income_board_manifest"] = getattr(args, "income_board_manifest", None)
     snapshot.write_text(json.dumps(source_snapshot, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     tide_state = "defensive" if (n(tide.get("tide_latest_mm")) or 0) < 0 else "constructive" if (n(tide.get("tide_latest_mm")) or 0) > 0 else "neutral"
@@ -335,11 +392,11 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
     b_accum = sum(dp_by.get(s, {}).get("accumulating") is True for s in b_symbols)
     b_unusual_directional = sum(str(unusual_by.get(s, {}).get("net_option_flow_bias")) not in {"", "None", "insufficient_evidence"} for s in b_symbols)
     report = f'''<toggle heading="h1">
-📊 交易计划 V2 — 扩展审阅版 | Daily Trading Plan V2 — Expanded Review ({args.date} session)
+{args.date} · 📊 交易计划 V2 — 扩展审阅版 | Daily Trading Plan V2 — Expanded Review
 
 <callout icon="⚠️" color="yellow_bg">
-<b>状态 Status:</b> REVIEW ONLY / MARKET CLOSED / LOCAL FILE · 市场会话: {args.date} U.S. close · 生成: {datetime.now(HKT).strftime('%Y-%m-%d %H:%M HKT')}.<br />
-本文件仅供审阅，不会创建、传送、修改或提交订单，也未更新 Notion 或数据库。历史期权记录是带日期的来源摘录，不是当前报价或订单建议。<br />
+<b>状态 Status:</b> REVIEW ONLY / MARKET CLOSED / ARCHIVE-READY · 市场会话: {args.date} U.S. close · 生成: {datetime.now(HKT).strftime('%Y-%m-%d %H:%M HKT')}.<br />
+本文件仅供审阅，不会创建、传送、修改或提交订单，也不会写入源数据库。若发布至 Notion，仅为归档，不构成交易动作。历史期权记录是带日期的来源摘录，不是当前报价或订单建议。<br />
 Research review only. Independently re-check current price, NBBO, liquidity, contract terms, event risk, fees, and suitability before any action.
 </callout>
 
@@ -413,6 +470,9 @@ Trend ({num(p['trend']['score'],1)}) and breadth ({num(p['breadth']['score'],1)}
 <b>Tier B:</b> {len(tier_b)} strict US-listed historical signal cards. {candidate_pool-len(tier_b)} high-score candidates were withheld by conflict, opposing flow, earnings, non-US scope, or other gates.
 
 ### 3.0a 多源比较 | Tier versus STLDC, Dark Pool & Unusual Flow
+
+{stldc_roster_markdown}
+
 <table fit-page-width="true" header-row="true">
 <tr><th>层级</th><th>标的</th><th>J Law</th><th>STLDC</th><th>Dark pool</th><th>Unusual flow</th><th>Option-flow verdict / reconciliation</th><th>结论</th></tr>
 {tr(['Tier A','none',f'chart Valid {chart_valid}',f'market BULL {bull} / BEAR {bear}',f'market net {mm(net_dp)}',f'latest normalized flow {unusual_date}',f'bullish {verdicts.get("bullish",0)} / bearish {verdicts.get("bearish",0)}','gate not met'])}
@@ -503,8 +563,15 @@ Reconciliation inputs met their configured freshness cadence. The material withh
 研究分析，非投资建议。Research analysis only; not investment advice.
 </toggle>
 '''
-    if args.income_board_markdown:
+    custom_income = None
+    if getattr(args, "income_board_manifest", None):
+        from render_weekly_income_board import render as render_income_board
+        custom_income = render_income_board(json.loads(Path(args.income_board_manifest).read_text(encoding="utf-8"))).strip()
+    elif args.income_board_markdown:
         custom_income = Path(args.income_board_markdown).read_text(encoding="utf-8").strip()
+    if not custom_income:
+        raise ValueError("Explicit selected-board manifest or validated withheld Part 4 Markdown required; raw source-ledger fallback disabled")
+    if custom_income:
         if not custom_income.startswith("## Part 4 ·"):
             raise ValueError("income board Markdown must start with '## Part 4 ·'")
         original_start = report.index("## Part 4 ·")
@@ -536,9 +603,12 @@ def main() -> int:
     parser.add_argument("--regime-json", required=True)
     parser.add_argument("--reconcile-json", required=True)
     parser.add_argument("--fragility-notes")
-    parser.add_argument("--income-board-markdown", help="validated Notion-compatible Part 4 Markdown; its source-ledger extracts are retained automatically")
+    parser.add_argument("--income-board-markdown", help="explicit validated selected/withheld Part 4 Markdown; raw source extracts omitted by default")
+    parser.add_argument("--income-board-manifest", help="validated ranked30/20/50 board manifest; preferred over pre-rendered Markdown")
     parser.add_argument("--retain-income-ledgers", action="store_true", help="append full raw income-source extracts to custom Part 4; default is concise selected-board output")
     args = parser.parse_args()
+    if not args.income_board_markdown and not args.income_board_manifest:
+        parser.error("Provide --income-board-manifest or explicit selected/withheld --income-board-markdown; no raw-ledger fallback")
     try:
         report, snapshot = build(args)
     except (RuntimeError, requests.RequestException, ValueError, KeyError) as error:
