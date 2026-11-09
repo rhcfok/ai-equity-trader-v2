@@ -118,6 +118,11 @@ class SymbolSignalBundle:
     flow_conflicts: list[str] = field(default_factory=list)
     flow_components: dict[str, Any] = field(default_factory=dict)
 
+    # Directional conviction sources (compute_directional_conviction)
+    stldc_row: dict[str, Any] | None = None  # latest trade-stldc-v2 row (trend structure)
+    quant2_row: dict[str, Any] | None = None  # latest quant2_leaderboard row (7D anticipation)
+    direction_conviction: dict[str, Any] = field(default_factory=dict)
+
     # J Law v2 structure
     jlaw_run_date: str | None = None
     jlaw_classification: str | None = None
@@ -713,6 +718,85 @@ def flow_alignment(strategy: str, composite: float | None) -> float:
     return 0.0
 
 
+# Directional conviction weights: trend structure (trade-stldc-v2) leads, the
+# quant2 7-session anticipation and the fused unusual-flow composite confirm.
+DIRECTION_WEIGHTS = {"stldc_trend": 0.40, "quant2_7d": 0.30, "flow_composite": 0.30}
+DIRECTION_BULL_THRESHOLD = 20.0
+DIRECTION_BEAR_THRESHOLD = -20.0
+
+
+def compute_directional_conviction(bundle: SymbolSignalBundle) -> dict[str, Any]:
+    """
+    Fused directional conviction in [-100, +100] from three independent sources:
+      1. trade-stldc-v2 trend structure (40%): votes from `structure`, `st_dir`,
+         `ldc_signal` and `stage` (BULL votes positive, BEAR negative).
+      2. quant2_leaderboard 7-session anticipation (30%): presence on the latest
+         leaderboard is bullish-only evidence, scaled by the rule set's walk-forward
+         hit rate (`score_hist_freq`); absence contributes 0 (not bearish).
+      3. flow_composite (30%): the fused unusual-flow score in [-100, +100].
+    Sources never gate alone — the weighted sum decides, and sign disagreements
+    are surfaced as conflicts instead of cancelling silently.
+    """
+    stldc = bundle.stldc_row if isinstance(bundle.stldc_row, dict) else None
+    quant2 = bundle.quant2_row if isinstance(bundle.quant2_row, dict) else None
+
+    stldc_score = 0.0
+    stldc_votes: list[str] = []
+    if stldc:
+        for field_name in ("structure", "st_dir", "ldc_signal", "stage"):
+            v = str(stldc.get(field_name) or "").upper()
+            if "BULL" in v or v == "LONG":
+                stldc_votes.append("+")
+            elif "BEAR" in v or v == "SHORT":
+                stldc_votes.append("-")
+        if stldc_votes:
+            stldc_score = 100.0 * stldc_votes.count("+") / len(stldc_votes) - 100.0 * stldc_votes.count("-") / len(stldc_votes)
+
+    quant2_score = 0.0
+    quant2_note: str | None = None
+    if quant2:
+        hist = safe_float(quant2.get("score_hist_freq"))
+        if hist is not None:
+            # hit rates in the wild span ~0.45-0.70; map to [40, 100] bullish conviction
+            quant2_score = max(40.0, min(100.0, (hist - 0.45) / 0.25 * 100.0))
+            quant2_note = (
+                f"{quant2.get('run_name')} #{quant2.get('rank')} "
+                f"wr={hist:.2f} rules={quant2.get('n_active_rules')}"
+            )
+
+    flow_score = bundle.flow_composite if bundle.flow_composite is not None else 0.0
+
+    comps = {
+        "stldc_trend": round(stldc_score, 1),
+        "quant2_7d": round(quant2_score, 1),
+        "flow_composite": round(flow_score, 1),
+    }
+    score = round(
+        DIRECTION_WEIGHTS["stldc_trend"] * stldc_score
+        + DIRECTION_WEIGHTS["quant2_7d"] * quant2_score
+        + DIRECTION_WEIGHTS["flow_composite"] * flow_score,
+        1,
+    )
+    label = "bull" if score >= DIRECTION_BULL_THRESHOLD else ("bear" if score <= DIRECTION_BEAR_THRESHOLD else "neutral")
+
+    conflicts: list[str] = []
+    signs = [c for c in (stldc_score, quant2_score, flow_score) if abs(c) >= 20.0]
+    if signs and (max(signs) > 0) != (min(signs) > 0):
+        conflicts.append("DIRECTION_CONFLICT")
+
+    bundle.direction_conviction = {
+        "score": score,
+        "label": label,
+        "components": comps,
+        "stldc_votes": stldc_votes,
+        "quant2": quant2_note,
+        "conflicts": conflicts,
+        "stldc_run_date": stldc.get("run_date") if stldc else None,
+        "quant2_run": (quant2.get("run_name") if quant2 else None),
+    }
+    return bundle.direction_conviction
+
+
 # ---------------------------------------------------------------------------
 # Safety Floors, Ceilings & Earnings Clearance
 # ---------------------------------------------------------------------------
@@ -1162,6 +1246,9 @@ def generate_opportunities_for_symbol(
         compute_flow_composite(bundle, report_date)
     flow_c = bundle.flow_composite if bundle.flow_composite is not None else 0.0
     flow_bull_veto = bundle.flow_label == "strong_bear"  # strong bearish flow blocks short-put structures
+    conviction = compute_directional_conviction(bundle)
+    conv_score = conviction["score"]
+    conv_note = f" · dir {conviction['label']} {conv_score:+.0f}"
     ivr = vol.iv_rank if vol.iv_rank is not None else 35.0
     rsi = vol.rsi_14 if vol.rsi_14 is not None else 50.0
     term_7_30 = vol.term_ratio_7_30 if vol.term_ratio_7_30 is not None else 1.0
@@ -1361,10 +1448,9 @@ def generate_opportunities_for_symbol(
     bps_regime_ok = (
         jlaw_cls in {"valid", "watch"}
         and (bundle.jlaw_score is None or bundle.jlaw_score >= 8)
-        and verdict in {"bullish", "mixed"}
+        and conviction["score"] >= DIRECTION_BULL_THRESHOLD
         and ivr >= 30.0
         and bundle.dp_accumulating is not False
-        and not flow_bull_veto
         and safety_floor is not None
     )
     if bps_regime_ok and safety_floor is not None:
@@ -1423,7 +1509,7 @@ def generate_opportunities_for_symbol(
                     safety_ceiling=safety_ceiling,
                     adverse_sweeps=adv_sweeps,
                     confirming_bids=whale_bids,
-                    notes=f"{int(target_width)}-wide Bull Put Spread <= floor {safety_floor:.2f} (RoR {ror*100:.1f}%)",
+                    notes=f"{int(target_width)}-wide Bull Put Spread <= floor {safety_floor:.2f} (RoR {ror*100:.1f}%){conv_note}",
                 )
                 if not best_bps_row or row["confidence_score"] > best_bps_row["confidence_score"]:
                     best_bps_row = row
@@ -1607,10 +1693,7 @@ def generate_opportunities_for_symbol(
     # 6. BEAR_CALL_SPREAD (Bearish flow + DP distribution call vertical)
     # ------------------------------------------------------------------
     bcs_regime_ok = (
-        (
-            (verdict == "bearish" and (flow_c <= -FLOW_LEAN or bundle.dp_accumulating is False))
-            or bundle.flow_label == "strong_bear"
-        )
+        conviction["score"] <= DIRECTION_BEAR_THRESHOLD
         and ivr >= 30.0
         and safety_ceiling is not None
     )
@@ -1670,7 +1753,7 @@ def generate_opportunities_for_symbol(
                     safety_ceiling=safety_ceiling,
                     adverse_sweeps=adv_sweeps,
                     confirming_bids=whale_bids,
-                    notes=f"{int(target_width)}-wide Bear Call Spread >= ceiling {safety_ceiling:.2f}",
+                    notes=f"{int(target_width)}-wide Bear Call Spread >= ceiling {safety_ceiling:.2f}{conv_note}",
                 )
                 if not best_bcs_row or row["confidence_score"] > best_bcs_row["confidence_score"]:
                     best_bcs_row = row
@@ -2294,6 +2377,31 @@ def main(argv: list[str] | None = None) -> int:
         for r in rows:
             flow_hist_by_sym.setdefault(str(r.get("ticker") or "").upper(), []).append(r)
 
+    # Prefetch directional-conviction sources once for the whole universe:
+    # trade-stldc-v2 (latest run_date) and quant2_leaderboard (latest run_name).
+    stldc_by_sym: dict[str, dict[str, Any]] = {}
+    quant2_by_sym: dict[str, dict[str, Any]] = {}
+    if sb is not None:
+        try:
+            latest_stldc = sb.select("trade-stldc-v2", params={"select": "run_date", "order": "run_date.desc", "limit": "1"})
+            if latest_stldc and latest_stldc[0].get("run_date"):
+                stldc_date = latest_stldc[0]["run_date"]
+                for r in sb.select("trade-stldc-v2", params={"select": "*", "run_date": f"eq.{stldc_date}"}):
+                    stldc_by_sym[str(r.get("symbol") or "").upper()] = r
+        except Exception as exc:  # noqa: BLE001 - conviction sources are optional enrichment
+            print(f"WARN: trade-stldc-v2 prefetch failed: {exc}", file=sys.stderr)
+        try:
+            latest_q2 = sb.select("quant2_leaderboard", params={"select": "run_name", "order": "created_at.desc", "limit": "1"})
+            if latest_q2 and latest_q2[0].get("run_name"):
+                q2_run = latest_q2[0]["run_name"]
+                for r in sb.select("quant2_leaderboard", params={"select": "*", "run_name": f"eq.{q2_run}"}):
+                    quant2_by_sym[str(r.get("ticker") or "").upper()] = r
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARN: quant2_leaderboard prefetch failed: {exc}", file=sys.stderr)
+    print(
+        f"Conviction sources: stldc rows={len(stldc_by_sym)}, quant2 rows={len(quant2_by_sym)}"
+    )
+
     all_candidates: list[dict[str, Any]] = []
     chain_cache: dict[str, list[OptionContractQuote]] = {}
     spot_cache: dict[str, float] = {}
@@ -2423,6 +2531,10 @@ def main(argv: list[str] | None = None) -> int:
                     bundle.spot_price = bundle.dp_top_level
         else:
             next_earn_override = None
+
+        # Directional-conviction sources (trend + 7D anticipation)
+        bundle.stldc_row = stldc_by_sym.get(sym)
+        bundle.quant2_row = quant2_by_sym.get(sym)
 
         trades = uw.get_option_trades(sym, limit=120)
         if not bundle.spot_price and trades:

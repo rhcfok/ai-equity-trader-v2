@@ -311,7 +311,7 @@ def test_wheel_csp_tactical_bucket():
 
 
 def test_bull_put_spread_adaptive_width_and_delta_cap():
-    b = base_bundle()
+    b = base_bundle(stldc_row={"structure": "BULL", "st_dir": "BULL", "ldc_signal": "LONG", "stage": "BULL-CONFIRM"})
     chain = [
         q("ABC", EXP_21, "P", 93.0, 1.60, 1.70, -0.25),
         q("ABC", EXP_21, "P", 88.0, 0.55, 0.60, -0.10),
@@ -329,7 +329,8 @@ def test_bull_put_spread_adaptive_width_and_delta_cap():
 
 def test_bull_put_spread_ten_wide_for_high_price():
     b = base_bundle(spot_price=200.0, jlaw_stop_loss=188.0, gex_put_wall=190.0, gex_call_wall=215.0,
-                    dp_top_level=192.0, jlaw_target_price=225.0)
+                    dp_top_level=192.0, jlaw_target_price=225.0,
+                    stldc_row={"structure": "BULL", "st_dir": "BULL", "ldc_signal": "LONG", "stage": "BULL-CONFIRM"})
     b.valuation = r.compute_uw_valuation_context("ABC", 200.0, earnings_rows([3, 3, 3, 3]), [], as_of_date=TODAY)
     chain = [
         q("ABC", EXP_21, "P", 185.0, 3.30, 3.40, -0.24),
@@ -397,7 +398,8 @@ def test_wheel_cc_is_stateless_and_at_or_above_ceiling():
 
 
 def test_bear_call_spread_on_bearish_distribution():
-    b = base_bundle(verdict="bearish", dp_accumulating=False, bearish_z=1.6)
+    b = base_bundle(verdict="bearish", dp_accumulating=False, bearish_z=1.6,
+                    stldc_row={"structure": "BEAR", "st_dir": "BEAR", "ldc_signal": "SHORT", "stage": "BEAR-CONFIRM"})
     chain = [
         q("ABC", EXP_21, "C", 112.0, 1.40, 1.50, 0.24),
         q("ABC", EXP_21, "C", 117.0, 0.35, 0.40, 0.08),
