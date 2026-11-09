@@ -5,6 +5,8 @@ Inputs
 ------
 * Supabase: trade-jlaw-v2, gex_snapshot, quant2_leaderboard, watchlist
 * Unusual Whales: /api/stock/{ticker}/option-contracts (NBBO, IV, Greeks, OI)
+* Unusual Whales: /api/stock/{ticker}/info (projected next earnings date and issue
+  type) — queried only for symbols without an upcoming date in the earnings export
 * Optional earnings JSON from the connected Unusual Whales upcoming-earnings tool
 
 The runner never creates an order, trade instruction, database row, or schedule.
@@ -24,7 +26,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterable
 
-from csp_bps_opportunity_core import ScreeningConfig, ScreeningError, build_audit, is_us_exchange, markdown_report
+from csp_bps_opportunity_core import (
+    PROJECTED_EARNINGS_SOURCE, ScreeningConfig, ScreeningError, as_iso_date, build_audit, field, is_us_exchange, markdown_report,
+)
 
 
 class RunnerError(RuntimeError):
@@ -157,6 +161,13 @@ class UnusualWhalesReader:
                 raise RunnerError(f"Unusual Whales chain pagination exceeded 100 pages for {symbol}.")
         return payload
 
+    def stock_info(self, symbol: str) -> dict[str, Any]:
+        payload = self.http.get(f"/api/stock/{urllib.parse.quote(symbol)}/info")
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise RunnerError(f"Unusual Whales stock info for {symbol} has an unexpected shape.")
+        return data
+
 
 def chunked(values: list[str], size: int) -> Iterable[list[str]]:
     for start in range(0, len(values), size):
@@ -278,6 +289,45 @@ def collect_contexts(reader: SupabaseReader, symbols: list[str] | None, include_
     ]
 
 
+def fill_projected_earnings(reader: Any, contexts: list[dict[str, Any]], as_of: date, config: ScreeningConfig) -> dict[str, Any]:
+    """Fill earnings-export gaps from Unusual Whales /stock/info.
+
+    Only symbols without an upcoming export date are queried. Sets ``issue_type`` (ETF
+    detection) and, when allowed, a projected next earnings date on or after ``as_of``
+    tagged with PROJECTED_EARNINGS_SOURCE. A failed lookup fails closed: the symbol stays
+    earnings-unconfirmed and is reported — never guessed.
+    """
+    summary: dict[str, Any] = {"queried": 0, "projected": 0, "etf": 0, "no_date": [], "failures": []}
+    if not (config.allow_projected_earnings or config.etf_earnings_exempt):
+        return summary
+    for context in contexts:
+        earnings = context.get("earnings") if isinstance(context.get("earnings"), dict) else {}
+        export_date = as_iso_date(field(earnings, "date", "earnings_date", "report_date"))
+        if export_date is not None and export_date >= as_of:
+            continue
+        symbol = str(context.get("symbol") or "").upper()
+        summary["queried"] += 1
+        try:
+            info = reader.stock_info(symbol)
+        except RunnerError as exc:
+            summary["failures"].append({"symbol": symbol, "error": str(exc)})
+            continue
+        issue_type = str(info.get("issue_type") or "").strip()
+        if issue_type:
+            context["issue_type"] = issue_type
+        if issue_type.upper() == "ETF":
+            summary["etf"] += 1
+            continue
+        projected = as_iso_date(info.get("next_earnings_date"))
+        if config.allow_projected_earnings and projected is not None and projected >= as_of:
+            context["earnings"] = {"date": projected.isoformat(), "source": PROJECTED_EARNINGS_SOURCE,
+                                   "announce_time": info.get("announce_time")}
+            summary["projected"] += 1
+        else:
+            summary["no_date"].append(symbol)
+    return summary
+
+
 def collect_live_chains(reader: UnusualWhalesReader, contexts: list[dict[str, Any]], config: ScreeningConfig) -> tuple[dict[str, Any], list[dict[str, str]]]:
     chains: dict[str, Any] = {}
     failures: list[dict[str, str]] = []
@@ -318,10 +368,12 @@ def build_parser() -> argparse.ArgumentParser:
     watch_scope.add_argument("--include-watch", dest="include_watch", action="store_true", help="Include J Law Watch rows (the default).")
     parser.set_defaults(include_watch=True)
     parser.add_argument("--allow-unconfirmed-earnings", action="store_true", help="Publish candidates with an explicit earnings-unconfirmed caution.")
+    parser.add_argument("--strict-earnings", action="store_true", help="Confirmed export dates only: disable the UW projected-date fallback and the ETF earnings exemption.")
     parser.add_argument("--bps-width", type=float, default=10.0, help="Bull-put-spread width in points. Default: 10.")
     parser.add_argument("--min-open-interest", type=int, default=100, help="Per-leg minimum OI. Default: 100.")
     parser.add_argument("--max-bid-ask-spread-pct", type=float, default=0.25, help="Maximum NBBO width/midpoint. Default: 0.25.")
     parser.add_argument("--top-n", type=int, default=20, help="Maximum number of hard-pass structures to publish, ranked across CSP and BPS. Default: 20.")
+    parser.add_argument("--max-per-symbol", type=int, default=2, help="Maximum published rows per ticker (best-scored first). Default: 2; 0 disables the cap.")
     parser.add_argument("--max-symbols", type=int, default=1000, help="Maximum US underlyings to query. Default: 1000 (effectively the full Valid/Watch pool; pass a smaller number to cap).")
     parser.add_argument("--exit-nonzero-on-provider-errors", action="store_true", help="Return non-zero when one or more chain requests fail.")
     return parser
@@ -329,20 +381,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    if args.bps_width <= 0 or args.min_open_interest < 0 or args.max_symbols < 1 or args.top_n < 1:
-        raise RunnerError("Width must be positive; OI non-negative; max-symbols and top-n at least one.")
+    if args.bps_width <= 0 or args.min_open_interest < 0 or args.max_symbols < 1 or args.top_n < 1 or args.max_per_symbol < 0:
+        raise RunnerError("Width must be positive; OI and max-per-symbol non-negative; max-symbols and top-n at least one.")
     config = ScreeningConfig(
         bps_width=args.bps_width,
         min_open_interest=args.min_open_interest,
         max_bid_ask_spread_pct=args.max_bid_ask_spread_pct,
         require_earnings_date=not args.allow_unconfirmed_earnings,
+        allow_projected_earnings=not args.strict_earnings,
+        etf_earnings_exempt=not args.strict_earnings,
         include_watch=args.include_watch,
         rank_limit=args.top_n,
+        max_rows_per_symbol=args.max_per_symbol,
     )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     provider_failures: list[dict[str, str]] = []
+    earnings_fallback: dict[str, Any] = {"queried": 0, "projected": 0, "etf": 0, "no_date": [], "failures": []}
     if args.fixture:
         contexts, chains, fixture_earnings, fixture_as_of = fixture_inputs(Path(args.fixture))
         as_of = parse_date(args.as_of) if args.as_of else fixture_as_of
@@ -358,29 +414,39 @@ def main() -> int:
             raise RunnerError("SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) are required.")
         if not uw_key:
             raise RunnerError("UW_API_KEY or UNUSUAL_WHALES_API_KEY is required for the direct Unusual Whales API.")
+        as_of = parse_date(args.as_of) if args.as_of else date.today()
         earnings = load_earnings(Path(args.earnings_json)) if args.earnings_json else {}
         requested = [item.strip().upper() for item in (args.symbols or "").split(",") if item.strip()] or None
         contexts = collect_contexts(SupabaseReader(supabase_url, supabase_key), requested, args.include_watch, args.max_symbols, earnings)
         uw = UnusualWhalesReader(uw_key, env("UW_BASE") or "https://api.unusualwhales.com", env("UW_CLIENT_API_ID") or "100001")
+        earnings_fallback = fill_projected_earnings(uw, contexts, as_of, config)
         chains, provider_failures = collect_live_chains(uw, contexts, config)
-        as_of = parse_date(args.as_of) if args.as_of else date.today()
 
     audit = build_audit(contexts, chains, config, as_of)
     audit["provider_failures"] = provider_failures
+    audit["earnings_fallback"] = earnings_fallback
     audit["sources"] = {
         "supabase_tables": ["trade-jlaw-v2", "gex_snapshot", "quant2_leaderboard", "watchlist"],
         "unusual_whales_endpoint": "/api/stock/{ticker}/option-contracts",
         "earnings_input": args.earnings_json or ("fixture" if args.fixture else "not supplied"),
+        "earnings_fallback": "disabled (--strict-earnings)" if args.strict_earnings else "/api/stock/{ticker}/info next_earnings_date (projected) and issue_type, only where the export has no upcoming date",
     }
     json_write(output_dir / "csp_bps_opportunity_audit.json", audit)
     (output_dir / "csp_bps_opportunity_report.md").write_text(markdown_report(audit), encoding="utf-8")
+    counts = audit["counts"]
     summary = {
         "ok": True,
         "as_of": audit["as_of"],
-        "underlyings_evaluated": audit["counts"]["underlyings_evaluated"],
-        "csp_eligible": audit["counts"]["csp_eligible"],
-        "bps_eligible": audit["counts"]["bps_eligible"],
-        "ranked_top20": audit["counts"]["ranked_top20"],
+        "underlyings_evaluated": counts["underlyings_evaluated"],
+        "csp_eligible": counts["csp_eligible"],
+        "bps_eligible": counts["bps_eligible"],
+        "eligible_symbols": counts["eligible_symbols"],
+        "ranked_top20": counts["ranked_top20"],
+        "board_symbols": counts["board_symbols"],
+        "withheld_by_symbol_cap": counts["withheld_by_symbol_cap"],
+        "projected_earnings_symbols": counts["projected_earnings_symbols"],
+        "etf_earnings_exempt_symbols": counts["etf_earnings_exempt_symbols"],
+        "earnings_fallback_failures": len(earnings_fallback["failures"]),
         "provider_failures": len(provider_failures),
         "output_dir": str(output_dir),
     }

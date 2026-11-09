@@ -10,10 +10,29 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-from csp_bps_opportunity_core import ScreeningConfig, build_audit, markdown_report
+from csp_bps_opportunity_core import PROJECTED_EARNINGS_SOURCE, ScreeningConfig, build_audit, markdown_report, rank_candidates
+import csp_bps_opportunity_runner as runner
 
 
 AS_OF = date(2026, 10, 9)
+
+
+def reasons_of(audit: dict) -> list:
+    return [reason for record in audit["evaluated"][0]["rejections"] for reason in record.get("reasons", [])]
+
+
+class FakeInfoReader:
+    """Offline stand-in for UnusualWhalesReader.stock_info."""
+
+    def __init__(self, infos: dict) -> None:
+        self.infos, self.calls = infos, []
+
+    def stock_info(self, symbol: str) -> dict:
+        self.calls.append(symbol)
+        value = self.infos[symbol]
+        if isinstance(value, Exception):
+            raise value
+        return value
 
 
 def context(earnings: bool = True, classification: str = "Valid") -> dict:
@@ -131,6 +150,157 @@ class CspBpsOpportunityTests(unittest.TestCase):
             self.assertTrue((tmp_path / "out" / "csp_bps_opportunity_audit.json").is_file())
             report = (tmp_path / "out" / "csp_bps_opportunity_report.md").read_text(encoding="utf-8")
             self.assertIn("CSP & 10-Point Bull Put Spread — Top 20 Ranked Board", report)
+
+    # --- Earnings fallback and ETF exemption -------------------------------------------
+
+    def test_etf_is_exempt_from_earnings_gate(self) -> None:
+        etf = context(earnings=False)
+        etf["issue_type"] = "ETF"
+        audit = build_audit([etf], {"TEST": chain()}, ScreeningConfig(), AS_OF)
+        self.assertEqual(len(audit["ranked_top20"]), 2)
+        for item in audit["ranked_top20"]:
+            self.assertEqual(item["earnings_basis"], "EARNINGS_NOT_APPLICABLE_ETF")
+            self.assertIsNone(item["earnings_date"])
+            self.assertIn("ETF (no earnings)", item["context_brief"])
+        self.assertEqual(audit["counts"]["etf_earnings_exempt_symbols"], 1)
+
+    def test_etf_exemption_off_restores_unconfirmed_rejection(self) -> None:
+        etf = context(earnings=False)
+        etf["issue_type"] = "ETF"
+        audit = build_audit([etf], {"TEST": chain()}, ScreeningConfig(etf_earnings_exempt=False), AS_OF)
+        self.assertEqual(audit["ranked_top20"], [])
+        self.assertIn("EARNINGS_UNCONFIRMED", reasons_of(audit))
+
+    def test_projected_earnings_date_clears_gate_and_is_labelled(self) -> None:
+        projected = context(earnings=False)
+        projected["earnings"] = {"date": "2026-11-20", "source": PROJECTED_EARNINGS_SOURCE}
+        audit = build_audit([projected], {"TEST": chain()}, ScreeningConfig(), AS_OF)
+        self.assertEqual(len(audit["ranked_top20"]), 2)
+        for item in audit["ranked_top20"]:
+            self.assertEqual(item["earnings_basis"], "EARNINGS_CLEAR_PROJECTED")
+            self.assertEqual(item["earnings_date"], "2026-11-20")
+            self.assertIn("earnings 2026-11-20 (UW projected)", item["reason"])
+        self.assertEqual(audit["counts"]["projected_earnings_symbols"], 1)
+
+    def test_confirmed_export_date_is_not_labelled_projected(self) -> None:
+        audit = self.audit()
+        for item in audit["ranked_top20"]:
+            self.assertEqual(item["earnings_basis"], "EARNINGS_CLEAR")
+            self.assertNotIn("UW projected", item["context_brief"])
+        self.assertEqual(audit["counts"]["projected_earnings_symbols"], 0)
+
+    def test_projected_earnings_is_ignored_in_strict_mode(self) -> None:
+        projected = context(earnings=False)
+        projected["earnings"] = {"date": "2026-11-20", "source": PROJECTED_EARNINGS_SOURCE}
+        audit = build_audit([projected], {"TEST": chain()}, ScreeningConfig(allow_projected_earnings=False), AS_OF)
+        self.assertEqual(audit["ranked_top20"], [])
+        self.assertIn("EARNINGS_UNCONFIRMED", reasons_of(audit))
+        self.assertEqual(audit["counts"]["projected_earnings_symbols"], 0)
+
+    def test_projected_earnings_inside_window_still_blocks_overlapping_expiry(self) -> None:
+        # Projected report 2026-10-20 falls after the 10-16 CSP expiry but before the 10-30 BPS expiry.
+        projected = context(earnings=False)
+        projected["earnings"] = {"date": "2026-10-20", "source": PROJECTED_EARNINGS_SOURCE}
+        audit = build_audit([projected], {"TEST": chain()}, ScreeningConfig(), AS_OF)
+        self.assertEqual([item["strategy"] for item in audit["ranked_top20"]], ["CSP"])
+        self.assertIn("EARNINGS_OVERLAP", reasons_of(audit))
+
+    def test_runner_fills_projected_earnings_only_where_export_lacks_an_upcoming_date(self) -> None:
+        contexts = [
+            {"symbol": "HAS", "earnings": {"date": "2026-11-20"}},   # upcoming export date: not queried
+            {"symbol": "PROJ", "earnings": {}},                      # projected future date
+            {"symbol": "STALE", "earnings": {"date": "2026-10-01"}}, # stale export date: queried
+            {"symbol": "OLD", "earnings": {}},                       # UW date already past: stays unconfirmed
+            {"symbol": "FUND", "earnings": {}},                      # ETF
+            {"symbol": "DOWN", "earnings": {}},                      # lookup fails: fail closed
+        ]
+        reader = FakeInfoReader({
+            "PROJ": {"issue_type": "Common Stock", "next_earnings_date": "2027-02-04", "announce_time": "postmarket"},
+            "STALE": {"issue_type": "Common Stock", "next_earnings_date": "2027-01-28"},
+            "OLD": {"issue_type": "Common Stock", "next_earnings_date": "2026-10-01"},
+            "FUND": {"issue_type": "ETF", "next_earnings_date": None},
+            "DOWN": runner.RunnerError("GET /api/stock/DOWN/info HTTP 500: unavailable"),
+        })
+        summary = runner.fill_projected_earnings(reader, contexts, AS_OF, ScreeningConfig())
+        by_symbol = {item["symbol"]: item for item in contexts}
+        self.assertNotIn("HAS", reader.calls)
+        self.assertEqual(by_symbol["HAS"]["earnings"], {"date": "2026-11-20"})
+        self.assertEqual(by_symbol["PROJ"]["earnings"]["date"], "2027-02-04")
+        self.assertEqual(by_symbol["PROJ"]["earnings"]["source"], PROJECTED_EARNINGS_SOURCE)
+        self.assertEqual(by_symbol["STALE"]["earnings"]["date"], "2027-01-28")
+        self.assertEqual(by_symbol["OLD"]["earnings"], {})
+        self.assertEqual(by_symbol["FUND"]["issue_type"], "ETF")
+        self.assertEqual(by_symbol["DOWN"]["earnings"], {})
+        self.assertEqual((summary["queried"], summary["projected"], summary["etf"]), (5, 2, 1))
+        self.assertEqual(summary["no_date"], ["OLD"])
+        self.assertEqual([item["symbol"] for item in summary["failures"]], ["DOWN"])
+
+    def test_runner_strict_earnings_makes_no_lookups(self) -> None:
+        contexts = [{"symbol": "PROJ", "earnings": {}}]
+        reader = FakeInfoReader({})
+        strict = ScreeningConfig(allow_projected_earnings=False, etf_earnings_exempt=False)
+        summary = runner.fill_projected_earnings(reader, contexts, AS_OF, strict)
+        self.assertEqual(reader.calls, [])
+        self.assertEqual(summary["queried"], 0)
+        self.assertEqual(contexts[0]["earnings"], {})
+
+    # --- Per-ticker cap ------------------------------------------------------------------
+
+    def test_per_ticker_cap_keeps_best_rows_in_score_order(self) -> None:
+        def row(symbol: str, score: int) -> dict:
+            return {"candidate_status": "ELIGIBLE", "symbol": symbol, "confidence_score": score, "reward_metric": 0.01, "strategy": "CSP", "expiry": "2026-10-16"}
+        rows = [row("AAA", 90), row("AAA", 89), row("AAA", 88), row("BBB", 87), row("CCC", 86)]
+        capped = rank_candidates([dict(item) for item in rows], ScreeningConfig(max_rows_per_symbol=2))
+        self.assertEqual([(item["symbol"], item["confidence_score"], item["top_rank"]) for item in capped],
+                         [("AAA", 90, 1), ("AAA", 89, 2), ("BBB", 87, 3), ("CCC", 86, 4)])
+        self.assertEqual(len(rank_candidates([dict(item) for item in rows], ScreeningConfig(max_rows_per_symbol=0))), 5)
+        short_board = rank_candidates([dict(item) for item in rows], ScreeningConfig(max_rows_per_symbol=2, rank_limit=3))
+        self.assertEqual([item["symbol"] for item in short_board], ["AAA", "AAA", "BBB"])
+
+    def test_cap_withheld_rows_stay_in_inventory_and_are_counted(self) -> None:
+        audit = build_audit([context()], {"TEST": chain()}, ScreeningConfig(max_rows_per_symbol=1), AS_OF)
+        counts = audit["counts"]
+        self.assertEqual((counts["ranked_top20"], counts["withheld_by_symbol_cap"]), (1, 1))
+        self.assertEqual((counts["board_symbols"], counts["eligible_symbols"]), (1, 1))
+        self.assertEqual(counts["csp_eligible"] + counts["bps_eligible"], 2)
+
+    # --- Report and CLI ------------------------------------------------------------------
+
+    def test_markdown_discloses_earnings_fallback_and_cap(self) -> None:
+        report = markdown_report(self.audit())
+        self.assertIn("projected next-earnings date is used and labelled `UW projected`", report)
+        self.assertIn("ETFs have no earnings and are exempt", report)
+        self.assertIn("At most 2 rows per ticker", report)
+        self.assertIn("withheld by the per-ticker cap", report)
+        self.assertIn("Earnings basis:", report)
+
+    def test_markdown_from_pre_fallback_audit_is_unchanged(self) -> None:
+        audit = self.audit()
+        for key in ("allow_projected_earnings", "etf_earnings_exempt", "max_rows_per_symbol"):
+            audit["config"].pop(key)
+        for key in ("board_symbols", "projected_earnings_symbols"):
+            audit["counts"].pop(key)
+        report = markdown_report(audit)
+        self.assertNotIn("UW projected", report)
+        self.assertNotIn("rows per ticker", report)
+        self.assertNotIn("Earnings basis:", report)
+
+    def test_fixture_runner_accepts_cap_and_strict_flags(self) -> None:
+        fixture = {"as_of": AS_OF.isoformat(), "contexts": [context()], "chains": {"TEST": chain()}}
+        script = Path(__file__).with_name("csp_bps_opportunity_runner.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            fixture_path = tmp_path / "fixture.json"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(script), "--fixture", str(fixture_path), "--output-dir", str(tmp_path / "out"),
+                                     "--max-per-symbol", "1", "--strict-earnings"], text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            summary = json.loads(result.stdout)
+            self.assertEqual((summary["ranked_top20"], summary["withheld_by_symbol_cap"]), (1, 1))
+            audit = json.loads((tmp_path / "out" / "csp_bps_opportunity_audit.json").read_text(encoding="utf-8"))
+            self.assertFalse(audit["config"]["allow_projected_earnings"])
+            self.assertFalse(audit["config"]["etf_earnings_exempt"])
+            self.assertEqual(audit["config"]["max_rows_per_symbol"], 1)
 
 
 if __name__ == "__main__":

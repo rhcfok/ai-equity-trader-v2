@@ -35,9 +35,18 @@ class ScreeningConfig:
     max_bid_ask_spread_pct: float = 0.25
     contract_multiplier: int = 100
     require_earnings_date: bool = True
+    # When the earnings export has no upcoming date, accept Unusual Whales'
+    # projected next_earnings_date (labelled UW projected in the board).
+    allow_projected_earnings: bool = True
+    # ETFs never report earnings, so the earnings gate does not apply to them.
+    etf_earnings_exempt: bool = True
     include_watch: bool = True
     rank_limit: int = 20
+    # Board diversity: at most this many published rows per ticker; 0 = no cap.
+    max_rows_per_symbol: int = 2
 
+
+PROJECTED_EARNINGS_SOURCE = "uw_stock_info_projected"
 
 US_EXCHANGES = {
     "NASDAQ", "NASDAQGS", "NASDAQCM", "NASDAQGM", "NYSE", "NYSEARCA",
@@ -208,14 +217,25 @@ def alignment_score(context: dict[str, Any]) -> int:
     return score
 
 
-def earnings_status(context: dict[str, Any], expiry: date, require_date: bool) -> tuple[bool, str, str | None]:
+def is_etf(context: dict[str, Any]) -> bool:
+    return str(context.get("issue_type") or "").strip().upper() == "ETF"
+
+
+def earnings_status(context: dict[str, Any], expiry: date, require_date: bool, *,
+                    etf_exempt: bool = False, allow_projected: bool = True) -> tuple[bool, str, str | None]:
+    """Return (ok, basis/reason code, event date). A projected date gates exactly like a confirmed one."""
+    if etf_exempt and is_etf(context):
+        return True, "EARNINGS_NOT_APPLICABLE_ETF", None
     earnings = context.get("earnings") if isinstance(context.get("earnings"), dict) else {}
     event_date = as_iso_date(field(earnings, "date", "earnings_date", "report_date"))
+    projected = str(earnings.get("source") or "") == PROJECTED_EARNINGS_SOURCE
+    if event_date is not None and projected and not allow_projected:
+        event_date = None
     if event_date is None:
         return (not require_date, "EARNINGS_UNCONFIRMED", None)
     if event_date <= expiry:
         return False, "EARNINGS_OVERLAP", event_date.isoformat()
-    return True, "EARNINGS_CLEAR", event_date.isoformat()
+    return True, "EARNINGS_CLEAR_PROJECTED" if projected else "EARNINGS_CLEAR", event_date.isoformat()
 
 
 def base_context_gates(context: dict[str, Any], config: ScreeningConfig) -> tuple[bool, list[str], float | None, str]:
@@ -286,7 +306,8 @@ def context_brief(context: dict[str, Any], floor: float, floor_source: str) -> s
 
 
 def _base_candidate(strategy: str, context: dict[str, Any], contract: dict[str, Any], dte: int,
-                    floor: float, floor_source: str, earnings_date: str | None) -> dict[str, Any]:
+                    floor: float, floor_source: str, earnings_date: str | None,
+                    earnings_basis: str | None = None) -> dict[str, Any]:
     source_context = {
         "jlaw": context.get("jlaw") if isinstance(context.get("jlaw"), dict) else {},
         "quant": context.get("quant") if isinstance(context.get("quant"), dict) else {},
@@ -296,13 +317,18 @@ def _base_candidate(strategy: str, context: dict[str, Any], contract: dict[str, 
         "term_structure": context.get("term_structure") if isinstance(context.get("term_structure"), dict) else {},
         "flow_summary": context.get("flow_summary") if isinstance(context.get("flow_summary"), dict) else {},
     }
+    brief = context_brief(context, floor, floor_source)
+    if earnings_basis == "EARNINGS_CLEAR_PROJECTED":
+        brief += f"; earnings {earnings_date} (UW projected)"
+    elif earnings_basis == "EARNINGS_NOT_APPLICABLE_ETF":
+        brief += "; ETF (no earnings)"
     return {
         "strategy": strategy, "symbol": str(context.get("symbol") or "").upper(),
         "category": context.get("category"), "exchange": context.get("exchange"),
         "expiry": contract["expiry"], "dte": dte, "short_put": contract,
         "safety_floor": round(floor, 4), "safety_floor_source": floor_source,
-        "earnings_date": earnings_date, "alignment_score": alignment_score(context),
-        "context_brief": context_brief(context, floor, floor_source),
+        "earnings_date": earnings_date, "earnings_basis": earnings_basis, "alignment_score": alignment_score(context),
+        "context_brief": brief,
         "source_context": source_context,
     }
 
@@ -456,7 +482,9 @@ def evaluate_underlying(context: dict[str, Any], chain_payload: Any, config: Scr
     hard_passes: list[dict[str, Any]] = []
     for short_put in puts:
         expiry = as_iso_date(short_put.get("expiry"))
-        earnings_ok, earnings_reason, earnings_date = earnings_status(context, expiry or as_of, config.require_earnings_date)
+        earnings_ok, earnings_reason, earnings_date = earnings_status(
+            context, expiry or as_of, config.require_earnings_date,
+            etf_exempt=config.etf_earnings_exempt, allow_projected=config.allow_projected_earnings)
         # CSP has the required strict signed-delta gate.
         passed, reasons, dte = contract_gates(short_put, spot=spot, floor=floor, as_of=as_of,
             min_dte=config.csp_min_dte, max_dte=config.csp_max_dte,
@@ -469,7 +497,7 @@ def evaluate_underlying(context: dict[str, Any], chain_payload: Any, config: Scr
             if collateral is None or collateral <= 0:
                 result["rejections"].append({"scope": "csp", "contract": short_put.get("option_symbol"), "reasons": ["INVALID_CSP_COLLATERAL"]})
             else:
-                candidate = _base_candidate("CSP", context, short_put, dte, floor, floor_source, earnings_date)
+                candidate = _base_candidate("CSP", context, short_put, dte, floor, floor_source, earnings_date, earnings_reason)
                 candidate.update({"spot": round(spot, 4), "credit": round(bid * config.contract_multiplier, 2),
                     "collateral": round(collateral, 2), "credit_to_collateral": round((bid * config.contract_multiplier) / collateral, 6),
                     "break_even": round(strike - bid, 4), "reward_metric": round(bid / (strike - bid), 6)})
@@ -516,7 +544,7 @@ def evaluate_underlying(context: dict[str, Any], chain_payload: Any, config: Scr
             if ror is None or ror < config.bps_min_return_on_risk or ror > config.bps_max_return_on_risk:
                 result["rejections"].append({"scope": "bps", "contract": short_put.get("option_symbol"), "reasons": ["BPS_RETURN_ON_RISK_OUTSIDE_20_TO_30_PCT_BAND"]})
                 continue
-            candidate = _base_candidate("BPS", context, short_put, dte, floor, floor_source, earnings_date)
+            candidate = _base_candidate("BPS", context, short_put, dte, floor, floor_source, earnings_date, earnings_reason)
             candidate.update({"spot": round(spot, 4), "long_put": long_put, "width": round(config.bps_width, 4),
                 "credit": round(credit, 2), "max_loss": round(max_loss, 2), "return_on_risk": round(ror, 6),
                 "break_even": round((strike or 0.0) - net_credit, 4), "reward_metric": round(ror, 6)})
@@ -537,33 +565,63 @@ def score_band(score: Any) -> str:
     return "Lower screen"
 
 
-def rank_candidates(candidates: Iterable[dict[str, Any]], config: ScreeningConfig) -> list[dict[str, Any]]:
-    """Rank every hard-pass structure across both strategies; score never excludes one."""
+def _rank_with_symbol_cap(candidates: Iterable[dict[str, Any]], config: ScreeningConfig) -> tuple[list[dict[str, Any]], int]:
+    """Return (board, rows withheld by the per-ticker cap while the board was still filling)."""
     values = [item for item in candidates if item.get("candidate_status") == "ELIGIBLE"]
     values.sort(key=lambda item: (-int(item.get("confidence_score") or 0), -(number(item.get("reward_metric")) or 0.0), str(item.get("strategy")), str(item.get("symbol")), str(item.get("expiry"))))
+    cap = max(0, int(config.max_rows_per_symbol or 0))
+    per_symbol: dict[str, int] = {}
     ranked: list[dict[str, Any]] = []
-    for rank, item in enumerate(values[:config.rank_limit], start=1):
-        item["top_rank"] = rank
+    withheld = 0
+    for item in values:
+        if len(ranked) >= config.rank_limit:
+            break
+        symbol = str(item.get("symbol") or "").upper()
+        if cap and per_symbol.get(symbol, 0) >= cap:
+            withheld += 1
+            continue
+        per_symbol[symbol] = per_symbol.get(symbol, 0) + 1
+        item["top_rank"] = len(ranked) + 1
         ranked.append(item)
-    return ranked
+    return ranked, withheld
+
+
+def rank_candidates(candidates: Iterable[dict[str, Any]], config: ScreeningConfig) -> list[dict[str, Any]]:
+    """Rank every hard-pass structure across both strategies; score never excludes one.
+
+    The published board keeps at most ``config.max_rows_per_symbol`` rows per ticker
+    (best-scored first; 0 disables the cap). Capped rows remain in the eligible inventory.
+    """
+    return _rank_with_symbol_cap(candidates, config)[0]
 
 
 def build_audit(contexts: Iterable[dict[str, Any]], chains: dict[str, Any], config: ScreeningConfig, as_of: date) -> dict[str, Any]:
     evaluated: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     eligible_by_strategy: dict[str, list[dict[str, Any]]] = {"CSP": [], "BPS": []}
+    projected_symbols = 0
+    etf_symbols = 0
     for context in contexts:
         symbol = str(context.get("symbol") or "").upper()
+        earnings = context.get("earnings") if isinstance(context.get("earnings"), dict) else {}
+        if config.etf_earnings_exempt and is_etf(context):
+            etf_symbols += 1
+        elif config.allow_projected_earnings and earnings.get("source") == PROJECTED_EARNINGS_SOURCE and field(earnings, "date", "earnings_date", "report_date"):
+            projected_symbols += 1
         result = evaluate_underlying(context, chains.get(symbol, {}), config, as_of)
         evaluated.append(result)
         eligible = result.get("eligible", [])
         candidates.extend(eligible)
         for candidate in eligible:
             eligible_by_strategy.setdefault(str(candidate.get("strategy")), []).append(candidate)
-    ranked = rank_candidates(candidates, config)
+    ranked, withheld = _rank_with_symbol_cap(candidates, config)
     return {"as_of": as_of.isoformat(), "config": asdict(config), "ranked_top20": ranked, "eligible": eligible_by_strategy, "evaluated": evaluated,
         "counts": {"underlyings_evaluated": len(evaluated), "csp_eligible": len(eligible_by_strategy["CSP"]), "bps_eligible": len(eligible_by_strategy["BPS"]),
-                   "ranked_top20": len(ranked), "provider_errors": sum(len(item.get("provider_errors", [])) for item in evaluated)}}
+                   "ranked_top20": len(ranked), "provider_errors": sum(len(item.get("provider_errors", [])) for item in evaluated),
+                   "eligible_symbols": len({str(item.get("symbol")) for item in candidates}),
+                   "board_symbols": len({str(item.get("symbol")) for item in ranked}),
+                   "withheld_by_symbol_cap": withheld,
+                   "projected_earnings_symbols": projected_symbols, "etf_earnings_exempt_symbols": etf_symbols}}
 
 
 def fmt_money(value: Any) -> str:
@@ -601,12 +659,38 @@ def _candidate_lines(items: list[dict[str, Any]], strategy: str) -> list[str]:
     return lines
 
 
+def _policy_extras(config: dict[str, Any]) -> list[str]:
+    """Policy lines for the earnings fallback and per-ticker cap; absent keys (older audits) add nothing."""
+    lines: list[str] = []
+    earnings_bits: list[str] = []
+    if config.get("allow_projected_earnings"):
+        earnings_bits.append("when the earnings export has no upcoming date, Unusual Whales' projected next-earnings date is used and labelled `UW projected`")
+    if config.get("etf_earnings_exempt"):
+        earnings_bits.append("ETFs have no earnings and are exempt")
+    if earnings_bits:
+        lines.append("- Earnings must fall strictly after expiry; " + "; ".join(earnings_bits) + ".")
+    cap = int(number(config.get("max_rows_per_symbol")) or 0)
+    if cap > 0:
+        lines.append(f"- At most {cap} rows per ticker are published (best-scored first); other hard passes stay in the audit inventory.")
+    return lines
+
+
+def _audit_extras(counts: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    if "board_symbols" in counts:
+        lines.append(f"- Tickers on the board: {counts.get('board_symbols', 0)} of {counts.get('eligible_symbols', 0)} with a hard pass; {counts.get('withheld_by_symbol_cap', 0)} higher-ranked rows withheld by the per-ticker cap.")
+    if "projected_earnings_symbols" in counts:
+        lines.append(f"- Earnings basis: {counts.get('projected_earnings_symbols', 0)} underlyings used a UW-projected date (no upcoming date in the export); {counts.get('etf_earnings_exempt_symbols', 0)} ETFs exempt.")
+    return lines
+
+
 def markdown_report(audit: dict[str, Any]) -> str:
     config, counts = audit.get("config") or {}, audit.get("counts") or {}
     ranked = audit.get("ranked_top20") if isinstance(audit.get("ranked_top20"), list) else []
     lines = [f"# CSP & 10-Point Bull Put Spread — Top {config.get('rank_limit', 20)} Ranked Board — {audit.get('as_of', 'unknown date')}", "", "**Research only.** No order instruction or order is created by this workflow.", "", "## Policy",
         f"- Include US-listed requested watchlist names with current J Law **Valid or Watch** status. `Skip` remains excluded; Watch is shown in the board rather than rejected solely for its label.",
         f"- CSP: {config.get('csp_min_dte')}–{config.get('csp_max_dte')} DTE and signed short-put delta strictly < {config.get('csp_short_delta_max')}. BPS: {config.get('bps_min_dte')}–{config.get('bps_max_dte')} DTE, no delta gate, exactly {config.get('bps_width')}-points wide, and {float(config.get('bps_min_return_on_risk', .2))*100:.0f}%–{float(config.get('bps_max_return_on_risk', .3))*100:.0f}% return on risk.",
+        *_policy_extras(config),
         f"- All rows below passed structural, safety-floor, earnings, OI, and usable-NBBO gates. **Score is a rank only; it does not filter eligibility.**", "", "## Top ranked hard-pass structures"]
     if not ranked:
         lines.append("No CSP or BPS structure passed every non-score hard gate.")
@@ -636,5 +720,5 @@ def markdown_report(audit: dict[str, Any]) -> str:
             exclusions.append(f"- **{symbol}:** excluded where applicable because the next earnings date is unconfirmed.")
     if exclusions:
         lines.extend(["", "## Important hard-gate exclusions", *exclusions])
-    lines.extend(["", "## Audit", f"- Underlyings evaluated: {counts.get('underlyings_evaluated', 0)}", f"- Hard-pass inventory before Top-{config.get('rank_limit', 20)} truncation: {counts.get('csp_eligible', 0)} CSP; {counts.get('bps_eligible', 0)} BPS.", f"- Rows published: {counts.get('ranked_top20', 0)}. Provider/input exceptions: {counts.get('provider_errors', 0)}.", "- CSP credit uses short-put bid. BPS credit uses short-put bid less long-put ask. Values are per contract and exclude commission, regulatory fees, and slippage.", "- GEX is market-structure context, not a prediction. `sub_resolution` GEX is map-only and does not tighten the safety floor.", "- The confidence score is deterministic and provisional; it is not a probability of profit, assignment probability, or order recommendation.", "", "This is research and analysis only, not personalized financial advice."])
+    lines.extend(["", "## Audit", f"- Underlyings evaluated: {counts.get('underlyings_evaluated', 0)}", f"- Hard-pass inventory before Top-{config.get('rank_limit', 20)} truncation: {counts.get('csp_eligible', 0)} CSP; {counts.get('bps_eligible', 0)} BPS.", f"- Rows published: {counts.get('ranked_top20', 0)}. Provider/input exceptions: {counts.get('provider_errors', 0)}.", *_audit_extras(counts), "- CSP credit uses short-put bid. BPS credit uses short-put bid less long-put ask. Values are per contract and exclude commission, regulatory fees, and slippage.", "- GEX is market-structure context, not a prediction. `sub_resolution` GEX is map-only and does not tighten the safety floor.", "- The confidence score is deterministic and provisional; it is not a probability of profit, assignment probability, or order recommendation.", "", "This is research and analysis only, not personalized financial advice."])
     return "\n".join(lines) + "\n"

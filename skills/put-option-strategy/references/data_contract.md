@@ -1,6 +1,8 @@
-# CSP / BPS Data Contract — Ranked Watch v3
+# CSP / BPS Data Contract — Ranked Watch v4
 
 Read before changing source mappings, hard gates, scoring, calculations, or ledger behavior.
+
+v4 (2026-11-09): projected-earnings fallback, ETF earnings exemption, and a per-ticker board cap. Scoring is unchanged.
 
 ## Sources and hierarchy
 
@@ -11,7 +13,7 @@ Read before changing source mappings, hard gates, scoring, calculations, or ledg
 | Stored GEX | `gex_snapshot` | `symbol`, `snapshot_ts`, `put_wall`, `call_wall`, `regime`, `net_gex_mm` | Safety-floor input only when its regime is valid. |
 | Quant confirmation | `quant2_leaderboard` | `ticker`, `as_of`, `rank`, `score_hist_freq`, `n_active_rules`, `active_rules` | Corroborative ranking input only. |
 | Option mechanics | Unusual Whales option contracts / `get_options_chain` | OCC symbol, delta, OI, volume, NBBO bid/ask, IV, timestamp | Canonical contract/quote source. |
-| Earnings firewall | Unusual Whales upcoming earnings | ticker, report date/time, expected move | Confirm event is strictly after expiry. |
+| Earnings firewall | Unusual Whales upcoming-earnings export; fallback `/api/stock/{ticker}/info` | export: ticker, report date; info: `next_earnings_date`, `issue_type` | Event must be strictly after expiry. Info is queried only where the export has no upcoming date. |
 | Live GEX | Unusual Whales `get_gex_levels(source="oi")` | put wall, call wall, gamma flip, date | Cross-check market structure; volume GEX is intraday context only. |
 | Volatility curve | Unusual Whales IV term structure | expiry, DTE, IV, implied move | Classify normal versus event-distorted premium. |
 | Flow / OI review | Unusual Whales flow by strike, OI changes, alerts, multi-leg flow | timestamps, strike, volume/OI, bid/ask-side fields | Ranking caution only; no volume-as-intent assumption. |
@@ -49,7 +51,7 @@ AND signed short-put delta < -0.20
 AND short strike <= safety_floor
 AND OI >= configured minimum
 AND NBBO width / midpoint <= configured maximum
-AND confirmed earnings date > expiry
+AND next earnings date > expiry          (see Earnings basis)
 ```
 
 ### 10-point BPS
@@ -62,10 +64,24 @@ AND same-expiry long strike = short strike - 10.00
 AND both legs meet OI and NBBO gates
 AND short bid - long ask > 0
 AND 20% <= net credit / maximum loss <= 30%
-AND confirmed earnings date > expiry
+AND next earnings date > expiry          (see Earnings basis)
 ```
 
 BPS delta is display-only: it is neither a gate nor a score input.
+
+### Earnings basis
+
+```text
+if issue_type == ETF:                          pass, basis EARNINGS_NOT_APPLICABLE_ETF
+elif export has a report date >= as-of:        use it, basis EARNINGS_CLEAR
+elif UW info next_earnings_date >= as-of:      use it, basis EARNINGS_CLEAR_PROJECTED
+else:                                          EARNINGS_UNCONFIRMED (reject); a stale export date is kept and rejects as overlap
+date <= expiry -> EARNINGS_OVERLAP (reject), whichever source supplied it
+```
+
+- A projected date gates exactly like an exported one. Rows that rely on it show `earnings <date> (UW projected)` in Key context; ETF rows show `ETF (no earnings)`. The basis is stored on each candidate as `earnings_basis`.
+- An info lookup that fails leaves the name `EARNINGS_UNCONFIRMED` (fail closed) and is listed under `earnings_fallback.failures` in the audit.
+- `--strict-earnings` disables both the fallback and the ETF exemption (confirmed export dates only).
 
 ## Economics
 
@@ -101,7 +117,7 @@ The 0–100 **Ranked Confidence Score** is a deterministic ordering device, not 
 1. Apply every structural hard gate first.
 2. Score **every** hard-pass CSP and BPS structure, including scores below 70.
 3. Sort all eligible structures across both strategies by score, reward metric, strategy, symbol, and expiry.
-4. Publish the first 20 rows (or all rows if fewer than 20 pass). Do not use a score threshold to remove a hard-pass candidate.
+4. Publish the first 20 rows, taking at most **2 rows per ticker** (best-scored first; `--max-per-symbol`, 0 disables). Rows withheld by the cap stay in the eligible inventory and are counted as `withheld_by_symbol_cap`; if fewer rows remain, publish all of them. Do not use a score threshold to remove a hard-pass candidate.
 5. Use score bands only for interpretation: 85–100 Strong screen; 70–84 Higher screen; 60–69 Moderate screen; below 60 Lower screen.
 6. Adverse near-strike flow caps score at 69 and is a caution flag; it does not independently remove a structurally eligible candidate.
 
@@ -120,6 +136,7 @@ The 0–100 **Ranked Confidence Score** is a deterministic ordering device, not 
 - `CSP_DELTA_NOT_STRICTLY_BELOW_THRESHOLD`
 - `ABOVE_TECHNICAL_SAFETY_FLOOR`
 - `EARNINGS_OVERLAP` / `EARNINGS_UNCONFIRMED`
+- Pass bases (not rejections): `EARNINGS_CLEAR` / `EARNINGS_CLEAR_PROJECTED` / `EARNINGS_NOT_APPLICABLE_ETF`
 - `OPEN_INTEREST_BELOW_MINIMUM`
 - `NBBO_QUOTE_MISSING` / `BID_ASK_SPREAD_TOO_WIDE`
 - `DEFAULT_WIDTH_LONG_PUT_MISSING`

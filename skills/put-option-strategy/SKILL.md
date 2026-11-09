@@ -22,9 +22,9 @@ Apply without exception:
 2. Allow the latest J Law label **Valid or Watch**. Exclude Skip.
 3. Require a positive J Law stop and an OTM short strike at or below the applicable safety floor.
 4. Use `min(J Law stop, OI-GEX put wall)` only for a valid GEX regime. Label `sub_resolution` GEX as map-only.
-5. Require earnings strictly after option expiry and usable NBBO / OI gates on all required legs.
+5. Require the next earnings date strictly after option expiry, plus usable NBBO / OI gates on all required legs. Use the earnings export's date; when it has no upcoming date, use Unusual Whales' projected `next_earnings_date` (`/api/stock/{ticker}/info`), labelled `UW projected` on the board. ETFs have no earnings and are exempt. A failed lookup fails closed: the name stays excluded as unconfirmed.
 6. For BPS, require exact 10-point width, positive net credit, and 20%–30% return on risk.
-7. Score all mechanical hard-pass structures. **Do not filter on score.** Rank all eligible CSP/BPS structures together and publish the first 20.
+7. Score all mechanical hard-pass structures. **Do not filter on score.** Rank all eligible CSP/BPS structures together, keep at most **2 rows per ticker** (best-scored first), and publish the first 20. Capped rows stay in the audit inventory; on thin days the board can hold fewer than 20 rows.
 
 ## Ranked confidence score
 
@@ -42,9 +42,9 @@ An adverse near-strike flow observation caps the score at 69 and must be shown a
 1. Anchor the report to the most recent completed US market session. Label all source dates and quote timestamps.
 2. Resolve requested US watchlist names and their latest J Law, Quant2, and stored GEX context. Retain Valid and Watch; record Skip/non-US exclusions in the audit. By default the screen covers the **full US-listed Valid/Watch pool** (200+ names, growing with the watchlist); pass `--max-symbols N` only to intentionally cap the universe.
 3. Pull the canonical Unusual Whales contract chain for each surviving ticker. A broad screener is discovery-only and cannot establish absence of contracts.
-4. Retrieve earnings, OI GEX, IV term structure, and flow/OI context. Treat earnings overlap as a hard reject and flow/OI as a scored caution only.
+4. Retrieve earnings (export first; UW projected date only where the export has none; ETFs exempt), OI GEX, IV term structure, and flow/OI context. Treat earnings overlap as a hard reject and flow/OI as a scored caution only.
 5. Construct CSPs and 10-point BPSs from NBBO; use short bid and long ask, never last or theoretical prices.
-6. Apply mechanical hard gates. Score every pass, then rank the combined CSP/BPS population to the configured Top N (default 20).
+6. Apply mechanical hard gates. Score every pass, then rank the combined CSP/BPS population to the configured Top N (default 20), at most 2 rows per ticker.
 7. Produce Markdown report plus immutable JSON audit. State key reasons and cautions, including whether quotes are live, delayed, frozen, or close-of-session.
 8. Persist Top-20 `ELIGIBLE` research rows only after the report has been reviewed. If there are no hard-pass rows, log `NO_QUALIFIED_SETUP`.
 9. For same-day tracking, use conservative close-to-exit marks and label results hypothetical, not executed P&L.
@@ -69,6 +69,8 @@ python3 scripts/csp_bps_opportunity_runner.py \
 ```
 
 The default accepts Watch. Use `--valid-only` only when intentionally restricting the universe. The default `--max-symbols 1000` screens the entire US-listed Valid/Watch pool; runtime scales with the number of Unusual Whales chain calls (a full-pool run takes several minutes).
+
+`--strict-earnings` restores confirmed-export-only earnings (no projected fallback, no ETF exemption). `--max-per-symbol N` changes the per-ticker board cap (default 2; `0` disables it). The run summary reports `eligible_symbols`, `board_symbols`, `withheld_by_symbol_cap`, `projected_earnings_symbols`, `etf_earnings_exempt_symbols`, and `earnings_fallback_failures`.
 
 Log the board after review:
 
