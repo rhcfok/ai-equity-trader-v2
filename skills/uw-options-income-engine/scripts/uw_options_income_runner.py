@@ -2215,7 +2215,9 @@ def latest_series_date(rows: list[dict[str, Any]]) -> date | None:
         if not isinstance(r, dict):
             continue
         d = parse_iso_date(str(r.get("date") or "")[:10])
-        if d and (best is None or d > best):
+        if d is None or d.weekday() >= 5:  # skip non-trading weekend rows
+            continue
+        if best is None or d > best:
             best = d
     return best
 
