@@ -38,17 +38,37 @@ def load_spy(start="1993-01-01", end=None, cache_path="out/spy_daily.csv",
              ticker="SPY") -> pd.DataFrame:
     """Download (or cache) adjusted daily closes for a ticker."""
     if end is None:
-        end = pd.Timestamp.today().strftime("%Y-%m-%d")
-    if os.path.exists(cache_path):
-        df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
-        if df.index[-1] >= pd.Timestamp(end) - pd.Timedelta(days=5):
+        # pad the exclusive end so the most recent session is never clipped
+        end = (pd.Timestamp.today() + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+    # freshness rule: prefer a fresh download every run (the daily job runs
+    # after the prior US close); cache is only a network-failure fallback.
+    try:
+        df = yf.download(ticker, start=start, end=end, progress=False,
+                         auto_adjust=True)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        # the newest bar often arrives with an adjusted Close of NaN while
+        # volume is already published; fill it from the unadjusted series
+        # (exact whenever no ex-dividend date sits in the gap)
+        if len(df) and df["Close"].isna().any():
+            raw = yf.download(ticker, start=start, end=end, progress=False,
+                              auto_adjust=False)
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
+            df["Close"] = df["Close"].fillna(
+                raw["Close"].reindex(df.index))
+        df = df[["Close"]].dropna()
+        if len(df):
+            df.to_csv(cache_path)
             return df
-    df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df[["Close"]].dropna()
-    df.to_csv(cache_path)
-    return df
+        raise ValueError(f"empty download for {ticker}")
+    except Exception:
+        if os.path.exists(cache_path):
+            df = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+            print(f"WARNING: using cached data for {ticker} "
+                  f"(last {df.index[-1].date()}); download failed")
+            return df
+        raise
 
 
 def log_returns(close: pd.Series) -> pd.Series:
