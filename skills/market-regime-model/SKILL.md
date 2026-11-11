@@ -21,6 +21,10 @@ cd "<repo>/skills/market-regime-model/scripts"
   `../out/summary_multi.json`、`../out/<TICKER>/…` 與 `../out/regime_report_<date>.md`，
   並把報告印在 `---REPORT-BEGIN---` / `---REPORT-END---` 之間。
 - 失敗重試一次；再失敗就推送「pipeline FAILED」一行通知，不要靜默跳過。
+- **故障排查（缺檔案）**：本 skill 的執行檔在 `main` 分支；若 repo 的 HEAD 被切到
+  其他分支（如 `skill/*`），scripts 會從工作目錄消失並報
+  `can't open file run_daily.py`。復原：
+  `git checkout main -- skills/market-regime-model && git restore --staged skills/market-regime-model`
 
 ## 推送到 Notion（帶日期的 toggle）
 

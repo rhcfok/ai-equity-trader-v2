@@ -51,7 +51,7 @@ def build_report() -> str:
     lines.append("")
 
     lines.append("**Transitions (last 14 days):**")
-    flagged = False
+    n_listed = 0
     for t in run_multi.TICKERS:
         tr = pd.read_csv(os.path.join(run_multi.OUTM, t,
                                       "transitions_hybrid.csv"),
@@ -61,10 +61,9 @@ def build_report() -> str:
             d = row["date"].strftime("%Y-%m-%d")
             age = (asof_ts - row["date"]).days
             flag = " — **new**" if age <= 3 else ""
-            if age <= 3:
-                flagged = True
             lines.append(f"- {t}: {row['from']} → **{row['to']}** on {d}{flag}")
-    if not flagged:
+            n_listed += 1
+    if n_listed == 0:
         lines.append("- none")
     lines.append("")
 
