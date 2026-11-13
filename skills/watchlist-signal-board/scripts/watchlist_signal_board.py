@@ -409,6 +409,110 @@ def fetch_flow(sb: SB) -> tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
+# Supabase destination upsert (idempotent on signal_key = run_date|symbol)
+# ---------------------------------------------------------------------------
+
+TABLE = "watchlist-signal-board"
+
+
+def _num(v, nd=None):
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(f, nd) if nd is not None else f
+
+
+def _date10(v):
+    return str(v)[:10] if v else None
+
+
+def build_rows(board, scan_by_sym, meta, run_date):
+    """Map board rows to the destination schema (sql/watchlist_signal_board.sql)."""
+    rows = []
+    for r in board:
+        sym = r["symbol"]
+        s = scan_by_sym.get(sym) or {}
+        scan_signals = {
+            "period_return_pct": s.get("period_return_pct"),
+            "pct_from_sma20": s.get("pct_from_sma20"),
+            "pct_from_sma50": s.get("pct_from_sma50"),
+            "macd_crossover": s.get("macd_crossover"),
+            "ema_crossover": s.get("ema_crossover"),
+            "earnings_timing": s.get("earnings_timing"),
+        }
+        rd = meta.get("run_dates", {})
+        rows.append(
+            {
+                "signal_key": f"{run_date}|{sym}",
+                "run_date": run_date,
+                "symbol": sym,
+                "category": r.get("category"),
+                "scan_score": _num(r.get("scan_score"), 2),
+                "scan_rsi": _num(r.get("scan_rsi"), 2),
+                "scan_adx": _num(r.get("scan_adx"), 2),
+                "scan_price": _num(r.get("scan_price"), 4),
+                "scan_period": meta.get("scan_period", "3mo"),
+                "scan_missing": bool(r.get("scan_missing")),
+                "next_earnings": _date10(r.get("next_earnings")),
+                "scan_signals": scan_signals,
+                "jlaw_yahoo_score": r.get("jlaw_yahoo_score"),
+                "jlaw_yahoo_cls": r.get("jlaw_yahoo_cls"),
+                "jlaw_yahoo_stop": _num(r.get("jlaw_yahoo_stop"), 4),
+                "jlaw_yahoo_target": _num(r.get("jlaw_yahoo_target"), 4),
+                "jlaw_yahoo_run_date": _date10(rd.get("jlaw_yahoo")),
+                "jlaw_chart_cls": r.get("jlaw_chart_cls"),
+                "jlaw_chart_vcp": r.get("jlaw_chart_vcp"),
+                "jlaw_chart_run_date": _date10(rd.get("jlaw_chart")),
+                "flow_verdict": r.get("flow_verdict"),
+                "flow_tilt": _num(r.get("flow_tilt"), 2),
+                "flow_run_date": _date10(rd.get("flow_verdict")),
+                "flow_stale": r.get("flow_stale"),
+                "quant2_rank": r.get("quant2_rank"),
+                "quant2_rules": r.get("quant2_rules"),
+                "quant2_grp": r.get("quant2_grp"),
+                "quant2_run": rd.get("quant2"),
+                "stldc_signal": r.get("stldc_signal"),
+                "stldc_dir": r.get("stldc_dir"),
+                "stldc_score": r.get("stldc_score"),
+                "stldc_structure": r.get("stldc_structure"),
+                "stldc_run_date": _date10(rd.get("stldc")),
+                "votes_bull": r["votes"]["bull"],
+                "votes_bear": r["votes"]["bear"],
+                "votes_neut": r["votes"]["neut"],
+                "consensus": r.get("consensus"),
+                "conflict": bool(r.get("conflict")),
+                "chart_veto": bool(r.get("chart_veto")),
+                "directions": r.get("directions"),
+                "spy_regime": meta.get("spy_regime"),
+                "meta": meta,
+            }
+        )
+    return rows
+
+
+def upsert_rows(sb: SB, rows: list[dict]) -> int:
+    """Batch upsert via PostgREST (merge-duplicates on signal_key)."""
+    written = 0
+    for i in range(0, len(rows), 200):
+        chunk = rows[i : i + 200]
+        r = requests.post(
+            f"{sb.base}/{TABLE}",
+            headers={**sb.h, "Content-Type": "application/json",
+                     "Prefer": "resolution=merge-duplicates,return=representation"},
+            params={"on_conflict": "signal_key"},
+            json=chunk,
+            timeout=60,
+        )
+        if not r.ok:
+            raise RuntimeError(f"upsert {TABLE}: HTTP {r.status_code}: {r.text[:200]}")
+        written += len(chunk)
+    return written
+
+
+# ---------------------------------------------------------------------------
 # Direction mapping (see references/methodology.md)
 # ---------------------------------------------------------------------------
 
@@ -492,6 +596,7 @@ def main():
     ap.add_argument("--period", default="3mo")
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--output-dir", default="reports")
+    ap.add_argument("--skip-supabase", action="store_true", help="Do not upsert the board to Supabase")
     ap.add_argument("--limit", type=int, default=None, help="Cap universe size (debug)")
     args = ap.parse_args()
 
@@ -660,6 +765,13 @@ def main():
         md.append(f"- **{r['symbol']}** ({r['category']}): {r['directions']}")
     (out_dir / f"watchlist_signal_board_{ts}.md").write_text("\n".join(md), encoding="utf-8")
     print(f"MD:   {out_dir / f'watchlist_signal_board_{ts}.md'}", file=sys.stderr)
+
+    if args.skip_supabase:
+        print("Supabase upsert skipped (--skip-supabase)", file=sys.stderr)
+    else:
+        rows = build_rows(board, scan_by_sym, meta, today.isoformat())
+        written = upsert_rows(sb, rows)
+        print(f"Supabase upsert: {written} rows into {TABLE} (run_date={today.isoformat()})", file=sys.stderr)
 
     print(json.dumps({"meta": meta, "rows": len(board)}, indent=2))
 

@@ -63,6 +63,19 @@ python3 skills/watchlist-signal-board/scripts/watchlist_signal_board.py \
 Outputs (timestamped, like every other pipeline here):
 `reports/watchlist_signal_board_<date>_<HHMM>.{json,md}`
 
+### Supabase destination
+
+By default the board is **upserted** to `public."watchlist-signal-board"` — one
+row per `run_date|symbol` (`signal_key`, unique), so same-day re-runs merge
+safely instead of duplicating. `--skip-supabase` writes local files only.
+
+Schema: `sql/watchlist_signal_board.sql` (idempotent DDL: table, indexes, RLS
+enabled with no policies — service-role only, `updated_at` trigger). Re-create
+from scratch with that file; same-day re-runs preserve `created_at` and touch
+`updated_at`. `meta` jsonb carries all five upstream run dates; `directions`
+jsonb keeps the per-signal vote audit trail; `scan_signals` jsonb keeps the
+scan detail (crossovers, period return, SMA distances).
+
 ## Reading the board
 
 - **Consensus** = majority of directional votes across the six signals
