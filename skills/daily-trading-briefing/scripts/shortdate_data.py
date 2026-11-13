@@ -141,6 +141,9 @@ def fetch_latest(indir: Path, creds: tuple[str, str] | None = None) -> dict:
     nf_date = latest_scalar("option_flow_symbol_signals", "signal_date")[0]
     state["nf_date"] = nf_date
     dump(sb_all(url, key, "option_flow_symbol_signals", {"select": "*", "signal_date": f"eq.{nf_date}"}), "normalized_flow_recent.json")
+    sb_date = latest_scalar("watchlist-signal-board", "run_date")[0]
+    state["signal_board_date"] = sb_date
+    dump(sb_all(url, key, "watchlist-signal-board", {"select": "*", "run_date": f"eq.{sb_date}"}), "signal_board.json")
     val = sb_all(url, key, "equity_valuation_uw_daily",
                  {"select": "ticker,as_of_date,price,fair_value,fair_value_adj,buy_below,buy_below_adj,anchor_verdict,valuation_category,"
                             "reference_source,reference_valuation_date,reference_fair_value,reference_buy_below,reference_price_target,"

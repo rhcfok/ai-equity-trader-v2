@@ -94,6 +94,7 @@ def main() -> None:
         t = x.get("ticker")
         if t not in val:
             val[t] = x
+    board = {x["symbol"]: x for x in load_creds_json(d / "signal_board.json")} if (d / "signal_board.json").exists() else {}
 
     led = {}
     for x in davis + uw:
@@ -169,6 +170,8 @@ def main() -> None:
             "verdict": verdict, "status": status, "stage": stg or "—", "fresh": fresh,
             "jlaw": str(L.get("jlaw_classification") or "—"),
             "dpn": dpn, "z": z, "qr": qr,
+            "scan": (board.get(sym) or {}).get("scan_score"),
+            "consensus": (board.get(sym) or {}).get("consensus"),
             "fv_adj": v.get("fair_value_adj"), "bb_adj": v.get("buy_below_adj"),
             "ref_bb": v.get("reference_buy_below"), "ref_fv": v.get("reference_fair_value"),
             "ref_date": v.get("reference_valuation_date"), "val_cat": v.get("valuation_category"),
@@ -205,14 +208,15 @@ def main() -> None:
         pool = sorted([x for x in scored if x["family"] == fam], key=lambda x: -x["conf"])[:5]
         md.append(f"\n### 4.1.{FAM_IDX[fam]} {title} — Top {len(pool) if pool else 0}\n")
         md.append('<table fit-page-width="true" header-row="true">')
-        md.append("<tr><th>#</th><th>Ticker</th><th>Strike(s)</th><th>Expiry/DTE</th><th>Confidence</th><th>pWin</th><th>p50</th><th>Credit/股</th><th>Max loss/张</th><th>jlaw</th><th>Flow(%s)</th><th>STLDC(%s)</th><th>DP net</th><th>z</th><th>quant2</th><th>来源</th></tr>" % (args.vdate, args.vdate))
+        md.append("<tr><th>#</th><th>Ticker</th><th>Strike(s)</th><th>Expiry/DTE</th><th>Confidence</th><th>pWin</th><th>p50</th><th>Credit/股</th><th>Max loss/张</th><th>jlaw</th><th>Flow(%s)</th><th>STLDC(%s)</th><th>DP net</th><th>z</th><th>quant2</th><th>scan score</th><th>来源</th></tr>" % (args.vdate, args.vdate))
         for i, x in enumerate(pool, 1):
             ml = f"${x['maxloss_sh']*100:,.0f}" if x["maxloss_sh"] else "实股口径"
-            md.append("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s /%s</td><td>%.2f</td><td>%.1f%%</td><td>%s</td><td>$%s</td><td>%s</td><td>%s</td><td>%s / %s</td><td>%s</td><td>%+.1fM</td><td>%+.2f</td><td>%s</td><td>%s</td></tr>" % (
+            md.append("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s /%s</td><td>%.2f</td><td>%.1f%%</td><td>%s</td><td>$%s</td><td>%s</td><td>%s</td><td>%s / %s</td><td>%s</td><td>%+.1fM</td><td>%+.2f</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
                 i, x["ticker"], x["legs"], x["expiry"], x["dte"] if x["dte"] is not None else "?", x["conf"],
                 x["pwin"] * 100, ("%.1f%%" % (x["p50"] * 100)) if x["p50"] is not None else "N/A",
                 f"{x['credit_sh']:g}", ml, x["jlaw"], x["verdict"], x["status"],
                 x["stage"], (x["dpn"] / 1e6), x["z"], ("#%d" % x["qr"]) if x["qr"] else "off",
+            ("%.2f" % x["scan"]) if x["scan"] is not None else "—",
                 "davis" if x["source"].startswith("option") else "uw"))
         md.append("</table>")
         if not pool:
