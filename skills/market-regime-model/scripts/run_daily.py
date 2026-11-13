@@ -25,6 +25,8 @@ import pandas as pd  # noqa: E402
 
 import run_multi  # noqa: E402  (main() is guarded, nothing runs at import)
 
+from pipeline import trend_state  # noqa: E402
+
 POSITIONS = {"Bull": 1.0, "Choppy": 0.25, "Bear": 0.0}
 
 
@@ -40,14 +42,27 @@ def build_report() -> str:
                  "frozen walk-forward parameters · WK-means × 126d trend hybrid "
                  "(hysteresis θ=0.55, m=3)")
     lines.append("")
-    lines.append("| Ticker | Regime | P(Bull) | P(Choppy) | P(Bear) | Days in regime |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("| Ticker | Regime | Trend | Dist | P(Bull) | P(Choppy) | P(Bear) | Days |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for t in run_multi.TICKERS:
         s = summary[t]
         p = s["probabilities"]
+        close = pd.read_csv(os.path.join(run_multi.OUTM, t,
+                                         f"{t.lower()}_daily.csv"),
+                            index_col=0, parse_dates=True)["Close"]
+        tr = trend_state(close, mom=126, band=0.02)
+        trend = "Up" if tr.iloc[-1] > 0 else "Down"
         lines.append(
-            f"| {t} | **{s['current_regime']}** | {p['Bull']:.2f} | "
+            f"| {t} | **{s['current_regime']}** | {trend} | "
+            f"{s['current_dist_state']} | {p['Bull']:.2f} | "
             f"{p['Choppy']:.2f} | {p['Bear']:.2f} | {s['days_in_regime']} |")
+    lines.append("")
+    lines.append("*P(\*) = WK-means distribution-shape probabilities (factor 1: "
+                 "which 40-day return distribution the window resembles; the Bear "
+                 "cluster = crash-like panics only). Trend = 126-day momentum "
+                 "Schmitt trigger, ±2% deadband (factor 2 — catches grind-down "
+                 "bears the distribution cannot see). Regime = hybrid of the two "
+                 "(non-Bull distribution + down trend → Bear).*")
     lines.append("")
 
     lines.append("**Transitions (last 14 days):**")
