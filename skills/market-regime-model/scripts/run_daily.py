@@ -57,7 +57,7 @@ def build_report() -> str:
             f"{s['current_dist_state']} | {p['Bull']:.2f} | "
             f"{p['Choppy']:.2f} | {p['Bear']:.2f} | {s['days_in_regime']} |")
     lines.append("")
-    lines.append("*P(\*) = WK-means distribution-shape probabilities (factor 1: "
+    lines.append("*P(*) = WK-means distribution-shape probabilities (factor 1: "
                  "which 40-day return distribution the window resembles; the Bear "
                  "cluster = crash-like panics only). Trend = 126-day momentum "
                  "Schmitt trigger, ±2% deadband (factor 2 — catches grind-down "
