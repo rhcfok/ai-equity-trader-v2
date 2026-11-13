@@ -180,6 +180,24 @@ python skills/daily-trading-briefing/scripts/flow_reconcile.py --date <date> --c
 
 当用户要求固定时点运行时，使用 Manus ScheduleTask，不使用驻留 shell cron。当前已批准的默认节奏为工作日 15:30 `Asia/Hong_Kong`（六字段 cron：`0 30 15 * * 1-5`）。每次触发必须以最近完成的美国市场 session 为 report date，重新运行数据签收、regime、对账、Unusual Whales 合约核验、Top-20 renderer 和 strict board check；不得复用旧报价或旧候选。Notion 只添加新的当日顶层 `<toggle>`，或定点替换同一 report date 的 toggle；历史块绝不改动。数据不完整、Unusual Whales 报价/事件无法验证或 strict check 失败时，保守发布并明确 withheld 项，不发布未经核验的收入板。
 
+## 短日期提案任务（short-date top-10，2026-11-13 增补）
+
+不要求收入板时的每日候选任务：**SP/SC/BPS/BCS 分策略 Top-5 置信度榜**（Part 4.1 v2）与 **Top-10 全量榜**（估值=仅供参考列）。
+
+```bash
+# ① 若最新批未评分（fetch 会提示 unscored_batches）：先重算 EM（写入 em-probability，幂等）
+python skills/em-expected-move/scripts/em_score.py
+# ② Top-10 全量榜（自动 fetch 最新：批/verdict/stldc/quant2/暗池/异动流/估值，全部只读 GET）
+python skills/daily-trading-briefing/scripts/shortdate_top10.py --indir out --out out/top10.json
+# ③ Part 4.1 分策略 Top-5（输出 markdown，可作 --income-board-markdown 传给 builder）
+python skills/daily-trading-briefing/scripts/part41_strategy_top5.py --indir out --out out/part4_v2.md
+```
+
+- **运行顺序硬规则**：em_score.py 必须在快照刷新之后跑（sigma 源表 = `em-model-snapshot`，em_score 取每 symbol 最高 as_of 行）。若 em-probability 的 sigma_as_of 落后最新已完成 session → 重跑 em_score。scored_at 列 upsert 不刷新，勿以它判断新旧，看 sigma_as_of。
+- **批次/vintage 约定**：csp-bps/uw 批次=收盘后生成（σ=同日）；davis 批次=盘前提案（report_date=下一 session，σ=前一收盘，by-design 不是滞后）。fetch-latest 会自动选「最新已评分批」，未评分的新批列入 unscored_batches 提示。
+- **置信度权重（win-rate 分级 sess_bacf128e 标定，窗口 2026-10-08→11-13 下跌市）**：jlaw-yahoo Watch 61.6%/67.4% 最强（±2.0，未分管道折中）；flow-verdict bearish 64.8%/75% 最强空头证据（+3.0/+1.5）、bullish 40.0% 低于 base（+0.5/+0.25）；STLDC CONFIRM chained 56.9% fresh 57.1%（+1.5/+0.75）、ALERT 无 edge（0）；DP/异动流未分级（±1.0）；quant2 not_validated（≤20 名 +1.0）。逆向证据取负。conflict −2 出局。
+- 数据事实：`equity_valuation_uw_daily.reference_*` 列 = Rijnberk 锚镜像（无需 join `equity_valuation` 兄弟表）；davis/uw `entry_credit` 为**每股**；davis/uw `collateral` 字段是坏列（常量占位）→ SP 保证金按 strike×100、BPS/BCS max loss 按 (宽−credit)×100；UW `/api/companies/{ticker}/profile` 需 Advanced tier（403），交易所核验用仓库 `watchlist` 表；Supabase REST 单次 1000 行上限，拉全量必须带 `order` + `offset` 分页（曾因未分页误判快照断供）。
+
 ## 已知坑
 
 - 表名 `trade-jlaw-v2` 带连字符；日期列是 `run_date`；`.env` base 若已含 `/rest/v1` 不要重复拼

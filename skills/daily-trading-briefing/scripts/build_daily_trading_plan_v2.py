@@ -232,6 +232,29 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
         if len(page) < 500:
             break
         offset += len(page)
+    # 7-day stage-transition window (Part 3.0b): newly BULL-ALERT / BULL-CONFIRM
+    stldc_hist = []
+    h_offset = 0
+    h_from = (date.fromisoformat(st_date) - timedelta(days=6)).isoformat()
+    while True:
+        hpage = get("trade-stldc-v2", select="run_date,symbol,stage", run_date=f"gte.{h_from}", order="run_date.asc,symbol.asc", limit="1000", offset=str(h_offset))
+        stldc_hist.extend(hpage)
+        if len(hpage) < 1000:
+            break
+        h_offset += len(hpage)
+    stage_series: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for _hr in stldc_hist:
+        stage_series[str(_hr.get("symbol"))].append((str(_hr.get("run_date")), str(_hr.get("stage") or "")))
+    new_bull_alert, new_bull_confirm = [], []
+    for _sym, _series in sorted(stage_series.items()):
+        if not _series:
+            continue
+        first_stage, last_stage = _series[0][1], _series[-1][1]
+        last_date = _series[-1][0]
+        if last_stage == "BULL-ALERT" and first_stage != "BULL-ALERT":
+            new_bull_alert.append((_sym, first_stage, last_date))
+        elif last_stage == "BULL-CONFIRM" and first_stage != "BULL-CONFIRM":
+            new_bull_confirm.append((_sym, first_stage, last_date))
     darkpool = get("darkpool_symbol_daily", select="*", fetch_date=f"eq.{args.date}", order="symbol.asc", limit="1000")
     davis = get("option-opportunity-davis", select="*", report_date=f"eq.{args.date}", order="symbol.asc", limit="100")
     csp_history = get("csp-bps-opportunity", select="*", order="report_date.desc,rank_in_strategy.asc.nullslast,symbol.asc", limit="100")
@@ -279,6 +302,8 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
     tier_b = sorted([x for x in preliminary_b if in_scope(x[0])], key=lambda x: (-(n(x[1].get("rrr")) or -999), x[0]))
     b_symbols = [x[0] for x in tier_b]
     unusual = get("option_flow_symbol_signals", select="*", signal_date=f"eq.{unusual_date}", ticker=f"in.({','.join(b_symbols)})", order="ticker.asc", limit="1000") if b_symbols and unusual_date != "not available" else []
+    # market-wide normalized flow for Part 3.4 debrief (all tickers, not just Tier B)
+    unusual_all = get("option_flow_symbol_signals", select="*", signal_date=f"eq.{unusual_date}", order="net_bias_z.desc", limit="1000") if unusual_date != "not available" else []
 
     st_by = {str(x.get("symbol") or "").upper(): x for x in stldc}
     dp_by = {str(x.get("symbol") or "").upper(): x for x in darkpool}
@@ -321,7 +346,9 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
     intelligence_row = intelligence[0] if intelligence else {}
     authors = parse_authors(intelligence_row.get("author_sections"))
     note = Path(args.fragility_notes).read_text(encoding="utf-8") if args.fragility_notes else ""
-    fragility = "LPI 44.7 (dashboard label Watch / Low, Falling) as-of 2026-10-28; scoring maps to LOW. Funding 3/3; lagged cross-check." if "LPI:" in note else "Dashboard note unavailable; use deterministic regime JSON only."
+    sd = regime["pillars"]["stress"].get("detail") or {}
+    fragility = (f"LPI {sd.get('lpi_tier', 'n/a')} (dashboard as-of {sd.get('as_of', 'n/a')}); funding {sd.get('funding_legs', 'n/a')} legs; lagged weekly cross-check; source notes: fragility_dashboard_source.md"
+                 if sd else ("Dashboard note unavailable; use deterministic regime JSON only."))
 
     fresh_rows = "".join(tr([x.get("table"), x.get("latest"), x.get("age_weekdays"), "daily" if x.get("max_age") == 0 else "T+1 accepted" if x.get("max_age") == 1 else f"≤{x.get('max_age')} trading days", x.get("status"), "within expected cadence" if x.get("status") == "ok" else "withhold affected conclusion"]) for x in reconcile["freshness"])
     conflict_rows = "".join(tr([x.get("symbol"), x.get("verdict"), f"{num(x.get('premium_today'))} / {num(x.get('premium_3d'))}", num(x.get("net_bias_z")), f"{mm(x.get('dp_net_mm'))} / {args.date}", f"{num(x.get('flow_composite'), 0)} {x.get('flow_label') or '—'}", ", ".join(x.get("flow_conflicts") or []) or "unresolved", "skip / re-run; not clean directional view"]) for x in conflicts)
@@ -380,7 +407,19 @@ def build(args: argparse.Namespace) -> tuple[Path, Path]:
         disposition = "historical only; share ownership + current chain required" if x.get("strategy") == "WHEEL_CC" else "historical only; fresh spot/NBBO/OI/earnings required"
         uw_rows.append(tr([f"UW income / {uw_day}", x.get("symbol"), x.get("strategy"), option_legs(x), f"{day(x.get('short_expiry') or x.get('expiry'))} / stored {x.get('short_dte') or x.get('dte')}d", economics, day(x.get("quote_as_of")), f"{x.get('verdict')}; {x.get('flow_label')}; DP {mm(x.get('dp_net_mm'))}", f"{x.get('score_band')} {num(x.get('confidence_score'),1)}; {shorten(x.get('caution'),120) or 'none'}", disposition]))
 
-    source_snapshot = {"retrieved_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "report_date": args.date, "mode": "local_review_only_no_external_writes", "policy_override": {"naked_csp": playbook["naked_csp"], "csp_dte_max": playbook["csp_dte_max"], "note": "2026-11-01 user instruction supersedes prior neutral core-only and shorter-duration text."}, "regime": regime, "reconciliation": reconcile, "jlaw_rows": jlaw, "flow_verdict_rows": flows, "flow_handoff": handoff, "stldc_rows": stldc, "darkpool_rows": darkpool, "normalized_unusual_rows": unusual, "watchlist_us_scope": watchlist, "option_davis_rows": davis, "csp_bps_rows": csp_history, "uw_income_rows": uw_history, "intelligence": intelligence, "income_board_markdown": str(Path(args.income_board_markdown).resolve()) if args.income_board_markdown else None}
+    # Part 3.0b: stage-transition highlight lists
+    trans_rows = "".join(tr([s, f"{st_date} → {d}", f"{prev} → BULL-ALERT", "7d window"]) for s, prev, d in new_bull_alert)
+    trans_rows += "".join(tr([s, f"{st_date} → {d}", f"{prev} → BULL-CONFIRM", "7d window"]) for s, prev, d in new_bull_confirm)
+    # Part 3.4: dark-pool + market-wide unusual flow debrief inputs
+    dp_sorted = sorted(darkpool, key=lambda x: (n(x.get("net_premium")) or 0), reverse=True)
+    dp_pos = [x for x in dp_sorted if (n(x.get("net_premium")) or 0) > 0][:8]
+    dp_neg = sorted([x for x in dp_sorted if (n(x.get("net_premium")) or 0) < 0], key=lambda x: (n(x.get("net_premium")) or 0))[:8]
+    dp_rows = "".join(tr([x.get("symbol"), mm((n(x.get("net_premium")) or 0) / 1e6), pct((n(x.get("buy_premium")) or 0) / max(n(x.get("total_premium")) or 1, 1e-9), 1), x.get("print_count"), x.get("block_count"), str(x.get("accumulating"))]) for x in dp_pos)
+    dp_rows += "".join(tr([x.get("symbol"), mm((n(x.get("net_premium")) or 0) / 1e6), pct((n(x.get("buy_premium")) or 0) / max(n(x.get("total_premium")) or 1, 1e-9), 1), x.get("print_count"), x.get("block_count"), str(x.get("accumulating"))]) for x in dp_neg)
+    uf_top = sorted(unusual_all, key=lambda x: abs(n(x.get("net_bias_z")) or 0), reverse=True)[:8]
+    uf_rows = "".join(tr([x.get("ticker"), num(x.get("net_bias_z"), 2), mm((n(x.get("net_directional_premium")) or 0) / 1e6), f"{n(x.get('bullish_pct')) or 0:.0f}%", f"{n(x.get('bearish_pct')) or 0:.0f}%", (x.get("dominant_structure") or "—"), (x.get("directional_confidence") or "—")]) for x in uf_top)
+    dp_total = sum(n(x.get("net_premium")) or 0 for x in darkpool) / 1e6
+    source_snapshot = {"retrieved_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "report_date": args.date, "mode": "local_review_only_no_external_writes", "policy_override": {"naked_csp": playbook["naked_csp"], "csp_dte_max": playbook["csp_dte_max"], "note": "2026-11-01 user instruction supersedes prior neutral core-only and shorter-duration text."}, "regime": regime, "reconciliation": reconcile, "jlaw_rows": jlaw, "flow_verdict_rows": flows, "flow_handoff": handoff, "stldc_rows": stldc, "stldc_hist_rows": stldc_hist, "darkpool_rows": darkpool, "normalized_unusual_rows": unusual, "normalized_unusual_market_rows": unusual_all, "watchlist_us_scope": watchlist, "option_davis_rows": davis, "csp_bps_rows": csp_history, "uw_income_rows": uw_history, "intelligence": intelligence, "income_board_markdown": str(Path(args.income_board_markdown).resolve()) if args.income_board_markdown else None}
     source_snapshot["stldc_stage_roster"] = {"as_of": st_date, "groups": stldc_groups, "excluded_symbols": stldc_exclusions, "scope": "verified U.S.-exchange universe"}
     snapshot = output / f"daily_trading_plan_v2_{args.date}_source_snapshot.json"
     source_snapshot["policy_override"]["note"] = "2026-11-04 user instruction: no blanket weak-regime CSP/SP block; CSP<=35d; soft6/4/10 EM-ranked board. Deterministic regime math unchanged."
@@ -411,7 +450,7 @@ Research review only. Independently re-check current price, NBBO, liquidity, con
 {tr(['波动率 Volatility','25%',num(p['vol']['score'],1),f"VIX {p['vol']['detail']['vix']}; VIX/VIX3M {p['vol']['detail']['vix_vix3m']}; RV20 {p['vol']['detail']['spy_rv20']}",f'regime-score / {args.date}','completed'])}
 {tr(['广度 Breadth','20%',num(p['breadth']['score'],1),f"STLDC BULL {bull} / BEAR {bear}; confirms {bull_confirm}/{bear_confirm}; chart Valid {p['breadth']['detail']['valid_count']}",f'STLDC {st_date}; JLaw {args.date}','T+1 accepted / completed'])}
 {tr(['期权流 Flow','15%',num(p['flow']['score'],1),f"5d avg {tide['tide_5d_avg_mm']:+.1f}M; positive {tide['tide_pos_sessions']}; latest {tide['tide_latest_mm']:+.1f}M",f"market tide {tide['tide_latest_date']}",'T+1 accepted'])}
-{tr(['脆弱度 Stress','10%',num(p['stress']['score'],1),'LPI Low; funding 3/3','Fragility dashboard / 2026-10-28','lagged cross-check'])}
+{tr(['脆弱度 Stress','10%',num(p['stress']['score'],1),f"LPI {p['stress']['detail'].get('lpi_tier','n/a')}; funding {p['stress']['detail'].get('funding_legs','n/a')}",f"Fragility dashboard / {p['stress']['detail'].get('as_of','n/a')}",'lagged cross-check'])}
 </table>
 
 ### 1.2 Regime inputs | 市场结构输入
@@ -420,7 +459,7 @@ Research review only. Independently re-check current price, NBBO, liquidity, con
 - <b>Flow coverage:</b> {len(flows)}/{len(flows)} rated: bullish {verdicts.get('bullish',0)}, mixed {verdicts.get('mixed',0)}, bearish {verdicts.get('bearish',0)}, protective {verdicts.get('protective',0)}, no-data {verdicts.get('no-data',0)}.
 - <b>STLDC / 宽度:</b> {st_date}, {len(stldc)} US-listed watchlist names: <b>BEAR {bear} vs BULL {bull} ({bear/bull:.1f}:1)</b>; BEAR-CONFIRM {bear_confirm} / BEAR-ALERT {bear_alert}, BULL-CONFIRM {bull_confirm} / BULL-ALERT {bull_alert}. SPY regime {p['breadth']['detail']['spy_regime_stldc']}.
 - <b>Dark pool / 暗池:</b> {args.date} board, {len(darkpool)} symbols, nets <b>{mm(net_dp)}</b>. Accumulation: {up_text}. Distribution: {down_text}.
-- <b>解读 Read:</b> Tide is {tide_state} while dark pool shows {mm(net_dp)} net {'accumulation' if net_dp > 0 else 'distribution'} and STLDC is near parity. This two-source divergence does not override NEUTRAL: Tier B remains a conditional, half-sized review card after a fresh rerun.
+- <b>解读 Read:</b> Tide is {tide_state} while dark pool shows {mm(net_dp)} net {'accumulation' if net_dp > 0 else 'distribution'} and STLDC is near parity. This two-source divergence does not override the {esc(regime['band'])} band: Tier B remains a conditional, half-sized review card after a fresh rerun.
 - <b>Fragility dashboard:</b> {fragility}
 
 ### 1.3 背离、解读与失效条件 | Divergences, Read-through & Invalidation
@@ -431,9 +470,9 @@ Trend ({num(p['trend']['score'],1)}) and breadth ({num(p['breadth']['score'],1)}
 ### 执行规则 | Playbook
 <table fit-page-width="true" header-row="true">
 <tr><th>Tier A</th><th>Tier B</th><th>允许策略</th><th>裸 CSP</th><th>CSP DTE cap</th><th>信用风险</th><th>财报处理</th><th>降档行动</th></tr>
-{tr([f"{playbook['size_mult']}x after fresh validation",f"{playbook['tier_b_size_mult']}x after fresh trigger",', '.join(playbook['income_strategies']),playbook['naked_csp'],f"≤{playbook['csp_dte_max']} calendar days",f"{playbook['credit_at_risk_pct_nlv']:.1f}% NLV",'no new entry inside 14-day stored block; re-check calendar','move each candidate down one tier and rebuild'])}
+{tr([f"{playbook['size_mult']}x after fresh validation",f"{playbook['tier_b_size_mult']}x after fresh trigger",', '.join(playbook['income_strategies']),playbook['naked_csp'],f"≤{playbook['csp_dte_max']} calendar days",f"{playbook['credit_at_risk_pct_nlv']:.2f}% NLV",'no new entry inside 14-day stored block; re-check calendar','move each candidate down one tier and rebuild'])}
 </table>
-<b>Policy amendment:</b> for this NEUTRAL review, naked CSP scope is <b>{NEUTRAL_CSP_UNIVERSE}</b> and the CSP DTE cap is <b>35 calendar days</b>. This supersedes earlier shorter-duration policy text.
+<b>Policy amendment:</b> for this {esc(regime['band'])} review, naked CSP scope is <b>{NEUTRAL_CSP_UNIVERSE}</b> and the CSP DTE cap is <b>35 calendar days</b>. This supersedes earlier shorter-duration policy text.
 
 ---
 ## Part 2 · 情报、对账与新鲜度 | Intelligence, Reconciliation & Freshness
@@ -480,6 +519,15 @@ Trend ({num(p['trend']['score'],1)}) and breadth ({num(p['breadth']['score'],1)}
 </table>
 <b>Interpretation:</b> no normalized row and insufficient evidence are not bullish unusual-flow signals; they are explicitly non-confirmatory rather than silently upgraded.
 
+### 3.0b 近 7 日新晋多头阶段 | Newly BULL-ALERT / BULL-CONFIRM (last 7 days)
+观察窗 {h_from} → {st_date}（trade-stldc-v2 全量对比）。新晋 = 窗口首日阶段非目标阶段、末日为目标阶段。
+<table fit-page-width="true" header-row="true">
+<tr><th>BULL-ALERT 新晋</th><th>数量 Count</th><th>标的（前段 → 现阶段，变更日）</th></tr>
+{tr(['BULL-ALERT', str(len(new_bull_alert)), '、'.join(f"{s}（{p}→ALERT，{d}）" for s, p, d in new_bull_alert) or 'None / 无'])}
+{tr(['BULL-CONFIRM', str(len(new_bull_confirm)), '、'.join(f"{s}（{p}→CONFIRM，{d}）" for s, p, d in new_bull_confirm) or 'None / 无'])}
+</table>
+分级提示：STLDC 实测 edges 薄（BULL-CONFIRM chained 56.9% vs base 54.3%，grading window 2026-10→11），新晋名单为关注线索而非入场批准；fresh confirm（57.1%）优于 stale（53.5%）。
+
 ### 3.1 A 级状态 | Tier A status
 Tier A is empty because chart Valid was zero on {args.date}. This is already reflected in the breadth score and is not a second independent downgrade.
 
@@ -488,6 +536,22 @@ Tier A is empty because chart Valid was zero on {args.date}. This is already ref
 <tr><th>Ticker</th><th>Side / order type</th><th>Trigger</th><th>Stop</th><th>Stop %</th><th>First target</th><th>RRR</th><th>Earnings</th><th>STLDC</th><th>Dark pool</th><th>Unusual flow</th><th>Flow verdict / reconciliation</th><th>Conflict action</th><th>Size</th><th>Source / as-of</th></tr>
 {''.join(b_rows)}
 </table>
+
+### 3.4 异动流与暗池纪要 | Unusual Flow & Dark Pool Debrief
+数据源：darkpool_symbol_daily（fetch_date {args.date}，{len(darkpool)} symbols）与 option_flow_symbol_signals（signal_date {unusual_date}，{len(unusual_all)} symbols，全市场）。暗池当日净额合计 {mm(dp_total)}；异动流按 |net_bias_z| 取前 8。
+
+<b>暗池 | Dark pool — 前 8 净流入 / 前 8 净流出</b>
+<table fit-page-width="true" header-row="true">
+<tr><th>Symbol</th><th>Net premium</th><th>Buy %</th><th>Prints</th><th>Blocks</th><th>Accumulating</th></tr>
+{dp_rows}
+</table>
+
+<b>异动流 | Unusual flow — |net_bias_z| 前 8（全市场）</b>
+<table fit-page-width="true" header-row="true">
+<tr><th>Ticker</th><th>net_bias_z</th><th>Net directional premium</th><th>Bullish %</th><th>Bearish %</th><th>Dom. structure</th><th>Confidence</th></tr>
+{uf_rows}
+</table>
+纪要要点：暗池净流入前列为跟随性吸筹线索、净流出前列为派发线索（买卖比例与 block 数佐证强度）；异动流 |net_bias_z|≥1 视为强方向读数。两者的实测胜率本轮尚未独立分级（win-rate grading 覆盖 flow-verdict/jlaw/STLDC/quant2），故仅作交叉证据，不单独构成方向结论。
 
 ---
 ## Part 4 · 期权收入板 | Options Income Plan
