@@ -124,9 +124,11 @@ class SymbolSignalBundle:
     quant2_row: dict[str, Any] | None = None  # latest quant2_leaderboard row (7D anticipation)
     direction_conviction: dict[str, Any] = field(default_factory=dict)
 
-    # Trend validation (watchlist-signal-board consensus), fair-value anchor
-    # (equity_valuation) and SMA support levels (Yahoo-derived)
+    # Trend validation (watchlist-signal-board consensus), fair-value anchors
+    # (equity_valuation_uw_daily preferred, equity_valuation posts as fallback)
+    # and SMA support levels (Yahoo-derived)
     signal_board_row: dict[str, Any] | None = None
+    uw_daily_row: dict[str, Any] | None = None
     equity_valuation_row: dict[str, Any] | None = None
     sma_data: dict[str, Any] | None = None  # {"sma20","sma50","sma100","bars"}
 
@@ -1499,84 +1501,117 @@ def generate_opportunities_for_symbol(
                 results.append(best_tac_row)
 
     # ------------------------------------------------------------------
-    # 1C: SHORT_PUT (SP) — cash-secured put anchored at fair valuation
-    # Strike nearest the equity_valuation fair value (OTM only), DTE < 60.
-    # ------------------------------------------------------------------
+    # 1C: SHORT_PUT (SP) — cash-secured put with a valuation-aware strike
+    # Anchor sources (price targets are never used):
+    #   equity_valuation_uw_daily COVERS its tickers: fair_value, else buy_below;
+    #   no uw_daily anchor -> no SP for that ticker (posts never override the model)
+    #   equity_valuation 'fair value'/'buy_below' posts fill uncovered tickers only
+    # Strike rules (anchor = min(fair_value, spot), never above spot):
+    #   buy_below inside the 10-20% OTM band   -> strike = buy_below
+    #   spot within 10% of fair (or buy_below too far) -> strike = spot x 0.85
+    #   spot > 10% above fair                  -> strike = fair value itself
+    ud_row = bundle.uw_daily_row if isinstance(bundle.uw_daily_row, dict) else None
     ev_row = bundle.equity_valuation_row if isinstance(bundle.equity_valuation_row, dict) else None
-    fair_value = None
-    if ev_row:
+    fair_value = fair_asof = buy_below = anchor_desc = None
+    ud_covers = ud_row is not None
+    if ud_row:
+        fv, bb = safe_float(ud_row.get("fair_value")), safe_float(ud_row.get("buy_below"))
+        fair_asof = str(ud_row.get("as_of_date") or "")[:10]
+        if bb and bb > 0:
+            buy_below = bb
+        if fv and fv > 0:
+            fair_value, anchor_desc = fv, f"uw_daily fair_value {fair_asof}"
+        elif bb and bb > 0:
+            fair_value, anchor_desc = bb, f"uw_daily buy_below {fair_asof}"
+    if fair_value is None and not ud_covers and ev_row:
         v = safe_float(ev_row.get("value"))
         lo, hi = safe_float(ev_row.get("value_low")), safe_float(ev_row.get("value_high"))
         if v is None and lo is not None and hi is not None:
             v = (lo + hi) / 2.0
-        if v and v > 0:
+        vtype = str(ev_row.get("valuation_type") or "").lower()
+        fair_asof = str(ev_row.get("post_date") or "")[:10]
+        if v and v > 0 and vtype in {"fair value", "buy_below"}:
             fair_value = v
-    val_age_days = None
-    if fair_value is not None:
-        post_dt = parse_iso_date(str((ev_row or {}).get("post_date") or "")[:10])
-        if post_dt:
-            val_age_days = (report_date - post_dt).days
-    if fair_value is not None and trend["label"] != "BEAR" and (val_age_days is None or val_age_days <= SP_MAX_VALUATION_AGE_DAYS):
-        # best short put per expiry: OTM strike closest to fair value, capped just above it
-        sp_candidates: list[tuple[OptionContractQuote, float]] = []
-        for p in puts:
-            if not (7 <= p.dte <= 59):
-                continue
-            if p.strike >= spot:
-                continue
-            if p.strike > fair_value * 1.02:
-                continue
-            if p.delta is not None and abs(p.delta) > 0.45:
-                continue
-            if (p.bid / p.strike) * (365.0 / p.dte) * 100.0 < 15.0:
-                continue
-            sp_candidates.append((p, abs(p.strike - fair_value)))
-        best_sp_row: dict[str, Any] | None = None
-        for p, dist in sorted(sp_candidates, key=lambda t: (t[1], -t[0].dte))[:1]:
-            if not is_earnings_clear(report_date, date.fromisoformat(p.expiry), val.earnings_date, val.earnings_report_time):
-                continue
-            adv_sweeps, whale_bids = evaluate_strike_flow_prints(trades, "put", p.strike)
-            if adv_sweeps > 0:
-                continue
-            ann_pct = (p.bid / p.strike) * (365.0 / p.dte) * 100.0
-            ror = p.bid / max(0.01, p.strike - p.bid)
-            row = _make_opportunity_row(
-                report_date=report_date,
-                run_id=run_id,
-                strategy="SHORT_PUT",
-                dte_bucket="SP",
-                bundle=bundle,
-                short_leg=p,
-                leg2=None,
-                leg2_role=None,
-                spread_width=None,
-                net_entry_price=p.bid,
-                entry_credit=p.bid,
-                entry_debit=None,
-                collateral=p.strike,
-                max_loss=p.strike - p.bid,
-                return_on_risk=ror,
-                annualized_pct=ann_pct,
-                break_even_low=p.strike - p.bid,
-                break_even_high=None,
-                safety_floor=safety_floor,
-                safety_ceiling=safety_ceiling,
-                adverse_sweeps=adv_sweeps,
-                confirming_bids=whale_bids,
-                notes=(
-                    f"SP anchored at fair value {fair_value:.2f} (dist {dist:.2f}, "
-                    f"post {ev_row.get('post_date')}, {ev_row.get('source')})"
-                    f" · trend {trend['label']}"
-                ),
+            anchor_desc = f"{vtype} ({ev_row.get('source')}, post {fair_asof})"
+            if vtype == "buy_below":
+                buy_below = v
+    if fair_value is not None and trend["label"] != "BEAR":
+        post_dt = parse_iso_date(fair_asof) if fair_asof else None
+        val_age_days = (report_date - post_dt).days if post_dt else None
+        if val_age_days is None or val_age_days <= SP_MAX_VALUATION_AGE_DAYS:
+            bb_in_band = buy_below is not None and (SP_BUFFER_LOW * spot) <= buy_below <= (SP_BUFFER_HIGH * spot)
+            close_to_fair = spot <= fair_value * SP_FAIR_CLOSE_FACTOR
+            if bb_in_band:
+                target, target_desc = buy_below, "buy_below"
+            elif close_to_fair:
+                target, target_desc = spot * SP_BUFFER_MID, "buffer 10-20% OTM"
+            else:
+                target, target_desc = fair_value, "fair_value"
+            band_lo, band_hi = (
+                (SP_BUFFER_LOW * spot, SP_BUFFER_HIGH * spot)
+                if target_desc.startswith("buffer")
+                else (None, target * 1.02)
             )
-            row["fair_value"] = fair_value
-            row["fair_value_asof"] = ev_row.get("post_date")
-            if not best_sp_row or row["confidence_score"] > best_sp_row["confidence_score"]:
-                best_sp_row = row
-        if best_sp_row:
-            results.append(best_sp_row)
+            sp_candidates: list[tuple[OptionContractQuote, float]] = []
+            for p in puts:
+                if not (7 <= p.dte <= 59):
+                    continue
+                if p.strike >= spot:
+                    continue
+                if band_lo is not None and not (band_lo <= p.strike <= band_hi):
+                    continue
+                if band_lo is None and p.strike > band_hi:
+                    continue
+                if p.delta is not None and abs(p.delta) > 0.45:
+                    continue
+                if (p.bid / p.strike) * (365.0 / p.dte) * 100.0 < 15.0:
+                    continue
+                sp_candidates.append((p, abs(p.strike - target)))
+            best_sp_row: dict[str, Any] | None = None
+            for p, dist in sorted(sp_candidates, key=lambda t: (t[1], -t[0].dte))[:1]:
+                if not is_earnings_clear(report_date, date.fromisoformat(p.expiry), val.earnings_date, val.earnings_report_time):
+                    continue
+                adv_sweeps, whale_bids = evaluate_strike_flow_prints(trades, "put", p.strike)
+                if adv_sweeps > 0:
+                    continue
+                ann_pct = (p.bid / p.strike) * (365.0 / p.dte) * 100.0
+                ror = p.bid / max(0.01, p.strike - p.bid)
+                row = _make_opportunity_row(
+                    report_date=report_date,
+                    run_id=run_id,
+                    strategy="SHORT_PUT",
+                    dte_bucket="SP",
+                    bundle=bundle,
+                    short_leg=p,
+                    leg2=None,
+                    leg2_role=None,
+                    spread_width=None,
+                    net_entry_price=p.bid,
+                    entry_credit=p.bid,
+                    entry_debit=None,
+                    collateral=p.strike,
+                    max_loss=p.strike - p.bid,
+                    return_on_risk=ror,
+                    annualized_pct=ann_pct,
+                    break_even_low=p.strike - p.bid,
+                    break_even_high=None,
+                    safety_floor=safety_floor,
+                    safety_ceiling=safety_ceiling,
+                    adverse_sweeps=adv_sweeps,
+                    confirming_bids=whale_bids,
+                    notes=(
+                        f"SP {target_desc} strike {p.strike:.2f} "
+                        f"(anchor {anchor_desc} {fair_value:.2f}, dist {dist:.2f}, age {val_age_days}d)"
+                        f" · trend {trend['label']}"
+                    ),
+                )
+                row["fair_value"] = fair_value
+                row["fair_value_asof"] = fair_asof
+                if not best_sp_row or row["confidence_score"] > best_sp_row["confidence_score"]:
+                    best_sp_row = row
+            if best_sp_row:
+                results.append(best_sp_row)
 
-    # ------------------------------------------------------------------
     # 2. WHEEL_CC (Stateless Covered Call Reference Board at/above GEX Call Wall)
     # ------------------------------------------------------------------
     reasons_joined = " ".join(bundle.verdict_reasons or []).lower()
@@ -2446,6 +2481,9 @@ SPREAD_MIN_SHARE: float = 0.6
 
 # SP fair-value anchors older than this are treated as stale (splits, thesis drift)
 SP_MAX_VALUATION_AGE_DAYS = 400
+# SP strike buffer band (10-20% OTM) and the "close to fair value" factor
+SP_BUFFER_LOW, SP_BUFFER_MID, SP_BUFFER_HIGH = 0.80, 0.85, 0.90
+SP_FAIR_CLOSE_FACTOR = 1.10
 
 
 def build_watchlist_universe(
@@ -2610,6 +2648,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Trend validation (watchlist-signal-board) + fair-value anchors (equity_valuation)
     signal_board_by_sym: dict[str, dict[str, Any]] = {}
+    uw_daily_by_sym: dict[str, dict[str, Any]] = {}
     equity_valuation_by_sym: dict[str, dict[str, Any]] = {}
     if sb is not None:
         try:
@@ -2621,13 +2660,36 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"WARN: watchlist-signal-board prefetch failed: {exc}", file=sys.stderr)
         try:
+            ud_rows = sb.select(
+                "equity_valuation_uw_daily",
+                params={
+                    "select": "ticker,as_of_date,price,fair_value,fair_value_adj,buy_below,buy_below_adj,anchor_verdict,valuation_category,source_mode",
+                    "as_of_date": f"gte.{(report_date - timedelta(days=14)).isoformat()}",
+                    "order": "as_of_date.desc",
+                },
+            )
+            for r in ud_rows:
+                tk = str(r.get("ticker") or "").upper()
+                # rows arrive newest-first; keep the newest row that carries an anchor
+                if tk not in uw_daily_by_sym and (safe_float(r.get("fair_value")) or safe_float(r.get("buy_below"))):
+                    uw_daily_by_sym[tk] = r
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARN: equity_valuation_uw_daily prefetch failed: {exc}", file=sys.stderr)
+        try:
             ev_rows = sb.select("equity_valuation", params={"select": "*"})
             by_ticker: dict[str, list[dict[str, Any]]] = {}
             for r in ev_rows:
+                # price targets (incl. multi-year ones) are rejected as SP anchors
+                if str(r.get("valuation_type") or "").lower() not in {"fair value", "buy_below"}:
+                    continue
                 by_ticker.setdefault(str(r.get("ticker") or "").upper(), []).append(r)
+            type_rank = {"fair value": 0, "buy_below": 1}
             for tk, lst in by_ticker.items():
-                # freshest post wins; prefer an explicit value over a low/high midpoint
-                lst.sort(key=lambda r: (str(r.get("post_date") or ""), str(r.get("ingested_at") or "")), reverse=True)
+                lst.sort(key=lambda r: (
+                    type_rank.get(str(r.get("valuation_type") or "").lower(), 9),
+                    str(r.get("post_date") or ""),
+                    str(r.get("ingested_at") or ""),
+                ))
                 equity_valuation_by_sym[tk] = lst[0]
         except Exception as exc:  # noqa: BLE001
             print(f"WARN: equity_valuation prefetch failed: {exc}", file=sys.stderr)
@@ -2645,7 +2707,8 @@ def main(argv: list[str] | None = None) -> int:
                 sma_by_sym[sym] = sma
     print(
         f"Trend/valuation sources: signal-board rows={len(signal_board_by_sym)}, "
-        f"equity_valuation tickers={len(equity_valuation_by_sym)}, SMA symbols={len(sma_by_sym)}"
+        f"uw_daily anchors={len(uw_daily_by_sym)}, equity_valuation tickers={len(equity_valuation_by_sym)}, "
+        f"SMA symbols={len(sma_by_sym)}"
     )
 
     all_candidates: list[dict[str, Any]] = []
@@ -2782,6 +2845,7 @@ def main(argv: list[str] | None = None) -> int:
         bundle.stldc_row = stldc_by_sym.get(sym)
         bundle.quant2_row = quant2_by_sym.get(sym)
         bundle.signal_board_row = signal_board_by_sym.get(sym)
+        bundle.uw_daily_row = uw_daily_by_sym.get(sym)
         bundle.equity_valuation_row = equity_valuation_by_sym.get(sym)
         bundle.sma_data = sma_by_sym.get(sym)
 

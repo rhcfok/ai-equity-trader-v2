@@ -672,34 +672,77 @@ class RunnerTestSuite(unittest.TestCase):
     pass
 
 
-def test_short_put_anchored_at_fair_value():
-    # fair value 92.0 with spot 100 -> the 92 strike (closest OTM to fair) is selected
-    b = base_bundle(equity_valuation_row={"ticker": "ABC", "value": 92.0, "post_date": "2026-11-01", "source": "test-digest"})
+def test_short_put_buffer_strike_when_close_to_fair():
+    # fair 92, spot 100 (within 10% of fair), buy_below 70 too far -> buffer strike ~85
+    b = base_bundle(uw_daily_row={"ticker": "ABC", "as_of_date": "2026-11-10", "fair_value": 92.0, "buy_below": 70.0})
     chain = [
-        q("ABC", EXP_21, "P", 97.0, 2.00, 2.10, -0.30),
-        q("ABC", EXP_21, "P", 92.0, 1.20, 1.30, -0.20),
-        q("ABC", EXP_21, "P", 87.0, 0.60, 0.70, -0.12),
+        q("ABC", EXP_32, "P", 92.0, 1.60, 1.70, -0.28),  # ATM-ish: outside the 10-20% buffer band
+        q("ABC", EXP_32, "P", 87.0, 1.20, 1.30, -0.19),  # in band, nearest the 85 target
     ]
     rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
     sp = [x for x in rows if x["strategy"] == "SHORT_PUT"]
-    assert len(sp) == 1
-    assert sp[0]["short_strike"] == 92.0  # closest to fair value among strikes <= 93.84 cap
-    assert sp[0]["dte_bucket"] == "SP"
-    assert sp[0]["annualized_pct"] >= 15.0
-    assert "fair value 92.00" in sp[0]["notes"]
+    assert len(sp) == 1 and sp[0]["short_strike"] == 87.0
+    assert "buffer 10-20% OTM" in sp[0]["notes"]
+    assert sp[0]["fair_value"] == 92.0
+
+
+def test_short_put_anchors_at_fair_when_spot_far_above():
+    # QCOM-shaped: fair 144, spot 173.5 (>10% above fair), buy_below 101 too far -> strike at fair
+    b = base_bundle(spot_price=173.5,
+                    uw_daily_row={"ticker": "QCOM", "as_of_date": "2026-11-10", "fair_value": 144.0,
+                                  "buy_below": 101.0, "anchor_verdict": "expensive"})
+    chain = [
+        q("QCOM", EXP_32, "P", 170.0, 3.00, 3.10, -0.35),  # above the fair*1.02 cap -> rejected
+        q("QCOM", EXP_32, "P", 145.0, 4.00, 4.10, -0.28),  # nearest fair 144
+    ]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    sp = [x for x in rows if x["strategy"] == "SHORT_PUT"]
+    assert len(sp) == 1 and sp[0]["short_strike"] == 145.0
+    assert "fair_value" in sp[0]["notes"]
+
+
+def test_short_put_uses_buy_below_when_in_buffer_band():
+    # buy_below 85 sits inside the 10-20% OTM band of spot 100 -> strike = buy_below
+    b = base_bundle(uw_daily_row={"ticker": "ABC", "as_of_date": "2026-11-10", "fair_value": 95.0, "buy_below": 85.0})
+    chain = [
+        q("ABC", EXP_32, "P", 85.0, 1.50, 1.60, -0.20),
+        q("ABC", EXP_32, "P", 88.0, 1.90, 2.00, -0.24),  # in band but farther from 85
+    ]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    sp = [x for x in rows if x["strategy"] == "SHORT_PUT"]
+    assert len(sp) == 1 and sp[0]["short_strike"] == 85.0
+    assert "buy_below" in sp[0]["notes"]
 
 
 def test_short_put_skipped_when_trend_validated_bear():
     b = base_bundle(
-        equity_valuation_row={"ticker": "ABC", "value": 92.0, "post_date": "2026-11-01", "source": "test-digest"},
+        uw_daily_row={"ticker": "ABC", "as_of_date": "2026-11-10", "fair_value": 92.0, "buy_below": 70.0},
         signal_board_row={"consensus": "BEAR", "run_date": "2026-11-13"},
         stldc_row={"structure": "BEAR", "st_dir": "BEAR", "ldc_signal": "SHORT", "stage": "BEAR-CONFIRM"},
     )
-    chain = [q("ABC", EXP_21, "P", 92.0, 1.20, 1.30, -0.20)]
+    chain = [q("ABC", EXP_32, "P", 87.0, 1.20, 1.30, -0.19)]
     rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
     assert not [x for x in rows if x["strategy"] == "SHORT_PUT"]
-    # and the bullish CSP regime is vetoed by the same trend validation
     assert not [x for x in rows if x["strategy"] == "WHEEL_CSP"]
+
+
+def test_short_put_skips_stale_anchor():
+    # a 2024-07-28 anchor is far older than the 400-day guard -> no SP
+    b = base_bundle(uw_daily_row={"ticker": "ABC", "as_of_date": "2024-07-28", "fair_value": 873.0, "buy_below": 700.0})
+    chain = [q("ABC", EXP_32, "P", 87.0, 1.20, 1.30, -0.19)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    assert not [x for x in rows if x["strategy"] == "SHORT_PUT"]
+
+
+def test_short_put_falls_back_to_buy_below_post():
+    # ticker NOT covered by uw_daily -> an equity_valuation buy_below post fills in
+    b = base_bundle(equity_valuation_row={"ticker": "ABC", "valuation_type": "buy_below", "value": 85.0,
+                                          "post_date": "2026-09-01", "source": "test-digest"})
+    chain = [q("ABC", EXP_32, "P", 85.0, 1.50, 1.60, -0.20)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    sp = [x for x in rows if x["strategy"] == "SHORT_PUT"]
+    assert len(sp) == 1 and sp[0]["short_strike"] == 85.0
+    assert "buy_below (test-digest, post 2026-09-01) 85.00" in sp[0]["notes"]
 
 
 def test_sma_support_gates_for_csp_and_cc():
