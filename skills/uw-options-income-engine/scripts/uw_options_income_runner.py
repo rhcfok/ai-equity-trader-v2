@@ -2673,7 +2673,7 @@ def main(argv: list[str] | None = None) -> int:
             ud_rows = sb.select(
                 "equity_valuation_uw_daily",
                 params={
-                    "select": "ticker,as_of_date,price,fair_value,fair_value_adj,buy_below,buy_below_adj,anchor_verdict,valuation_category,source_mode",
+                    "select": "ticker,as_of_date,price,fair_value,fair_value_adj,buy_below,buy_below_adj,anchor_verdict,valuation_category,source_mode,fundamentals_as_of_date,estimates_as_of_date",
                     "as_of_date": f"gte.{(report_date - timedelta(days=14)).isoformat()}",
                     "order": "as_of_date.desc",
                 },
