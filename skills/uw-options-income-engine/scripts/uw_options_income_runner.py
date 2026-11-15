@@ -9,7 +9,7 @@ RSI(14), GEX wall, Dark Pool, and strike-level sweep filters.
 Key design guarantees:
   1. 100% Stateless on Portfolio Holdings: Never reads `watchlist.position` or
      brokerage holdings. Every strategy (`WHEEL_CSP`, `WHEEL_CC`,
-     `BULL_PUT_SPREAD`, `SHORT_STRANGLE`, `DIAGONAL_SPREAD`, `BEAR_CALL_SPREAD`)
+     `SHORT_PUT`, `BULL_PUT_SPREAD`, `SHORT_STRANGLE`, `DIAGONAL_SPREAD`, `BEAR_CALL_SPREAD`)
      is evaluated purely on market structure, Unusual Whales data, J Law levels,
      GEX walls, and Dark Pool accumulation/distribution.
   2. Unusual Whales Replaces `equity_valuation_signal_daily`: Computes TTM EPS,
@@ -38,6 +38,7 @@ import statistics
 import sys
 import time
 from typing import Any, Callable, Iterable
+from urllib.parse import quote
 
 import requests
 
@@ -122,6 +123,12 @@ class SymbolSignalBundle:
     stldc_row: dict[str, Any] | None = None  # latest trade-stldc-v2 row (trend structure)
     quant2_row: dict[str, Any] | None = None  # latest quant2_leaderboard row (7D anticipation)
     direction_conviction: dict[str, Any] = field(default_factory=dict)
+
+    # Trend validation (watchlist-signal-board consensus), fair-value anchor
+    # (equity_valuation) and SMA support levels (Yahoo-derived)
+    signal_board_row: dict[str, Any] | None = None
+    equity_valuation_row: dict[str, Any] | None = None
+    sma_data: dict[str, Any] | None = None  # {"sma20","sma50","sma100","bars"}
 
     # J Law v2 structure
     jlaw_run_date: str | None = None
@@ -709,7 +716,7 @@ def compute_flow_composite(bundle: SymbolSignalBundle, as_of_date: date) -> Symb
 def flow_alignment(strategy: str, composite: float | None) -> float:
     """Map the flow composite to strategy alignment in [-1, 1]."""
     c = (composite or 0.0) / 100.0
-    if strategy in {"WHEEL_CSP", "BULL_PUT_SPREAD", "DIAGONAL_SPREAD"}:
+    if strategy in {"WHEEL_CSP", "SHORT_PUT", "BULL_PUT_SPREAD", "DIAGONAL_SPREAD"}:
         return c
     if strategy in {"BEAR_CALL_SPREAD", "WHEEL_CC"}:
         return -c
@@ -740,17 +747,7 @@ def compute_directional_conviction(bundle: SymbolSignalBundle) -> dict[str, Any]
     stldc = bundle.stldc_row if isinstance(bundle.stldc_row, dict) else None
     quant2 = bundle.quant2_row if isinstance(bundle.quant2_row, dict) else None
 
-    stldc_score = 0.0
-    stldc_votes: list[str] = []
-    if stldc:
-        for field_name in ("structure", "st_dir", "ldc_signal", "stage"):
-            v = str(stldc.get(field_name) or "").upper()
-            if "BULL" in v or v == "LONG":
-                stldc_votes.append("+")
-            elif "BEAR" in v or v == "SHORT":
-                stldc_votes.append("-")
-        if stldc_votes:
-            stldc_score = 100.0 * stldc_votes.count("+") / len(stldc_votes) - 100.0 * stldc_votes.count("-") / len(stldc_votes)
+    stldc_votes, stldc_score = stldc_vote_score(stldc)
 
     quant2_score = 0.0
     quant2_note: str | None = None
@@ -800,6 +797,123 @@ def compute_directional_conviction(bundle: SymbolSignalBundle) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 # Safety Floors, Ceilings & Earnings Clearance
 # ---------------------------------------------------------------------------
+
+
+def stldc_vote_score(stldc: dict[str, Any] | None) -> tuple[list[str], float]:
+    """Directional votes from a trade-stldc-v2 row: (+ for BULL/LONG fields, - for BEAR/SHORT)."""
+    votes: list[str] = []
+    if isinstance(stldc, dict):
+        for field_name in ("structure", "st_dir", "ldc_signal", "stage"):
+            v = str(stldc.get(field_name) or "").upper()
+            if "BULL" in v or v == "LONG":
+                votes.append("+")
+            elif "BEAR" in v or v == "SHORT":
+                votes.append("-")
+    if not votes:
+        return [], 0.0
+    return votes, 100.0 * (votes.count("+") - votes.count("-")) / len(votes)
+
+
+def compute_trend_validation(bundle: SymbolSignalBundle) -> dict[str, Any]:
+    """
+    Trend validation from two independent engines, applied to every strategy:
+      - watchlist-signal-board `consensus` (itself a fusion of stldc + J Law chart/yahoo
+        + flow verdict + quant2 + technical scan) is the primary signal;
+      - trade-stldc-v2 votes are the explicit second opinion.
+    Label is BULL/BEAR only when the board says so and stldc does not contradict
+    (a missing stldc row defers to the board). Bullish-structures are vetoed on BEAR,
+    bearish-structures on BULL; NEUT never vetoes.
+    """
+    sb = bundle.signal_board_row if isinstance(bundle.signal_board_row, dict) else None
+    sb_consensus = str((sb or {}).get("consensus") or "").upper()
+    votes, stldc_net = stldc_vote_score(bundle.stldc_row)
+    stldc_label = "BULL" if stldc_net >= 50 else ("BEAR" if stldc_net <= -50 else "NEUT")
+
+    label = "NEUT"
+    if sb_consensus == "BULL" and stldc_label != "BEAR":
+        label = "BULL"
+    elif sb_consensus == "BEAR" and stldc_label != "BULL":
+        label = "BEAR"
+
+    detail = {
+        "label": label,
+        "signal_board": sb_consensus or "no-data",
+        "signal_board_run": (sb or {}).get("run_date"),
+        "stldc_net": stldc_net,
+        "stldc_label": stldc_label,
+        "stldc_votes": votes,
+        "conflict_flag": (sb or {}).get("conflict"),
+    }
+    bundle.direction_conviction = {**bundle.direction_conviction, "trend_validation": detail} if bundle.direction_conviction else bundle.direction_conviction
+    return detail
+
+
+def fetch_sma_levels(symbol: str, timeout: float = 15.0) -> dict[str, Any] | None:
+    """
+    SMA20/50/100 from Yahoo daily closes (1y of bars). Returns
+    {"sma20","sma50","sma100","bars","asof"} or None when the symbol is unavailable.
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}"
+    try:
+        resp = requests.get(
+            url,
+            params={"interval": "1d", "range": "1y", "includeAdjustedClose": "true"},
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0 (uw-options-income-engine)"},
+        )
+        if not resp.ok:
+            return None
+        result = ((resp.json() or {}).get("chart") or {}).get("result") or []
+        if not result:
+            return None
+        meta_ts = result[0].get("timestamp") or []
+        closes = ((result[0].get("indicators") or {}).get("quote") or [{}])[0].get("close") or []
+        closes = [c for c in closes if isinstance(c, (int, float))]
+        if len(closes) < 100:
+            return None
+        out: dict[str, Any] = {"bars": len(closes)}
+        for window in (20, 50, 100):
+            if len(closes) >= window:
+                out[f"sma{window}"] = round(sum(closes[-window:]) / window, 4)
+        out["asof"] = (
+            datetime.fromtimestamp(meta_ts[len(closes) - 1], tz=timezone.utc).date().isoformat()
+            if meta_ts and len(meta_ts) >= len(closes)
+            else None
+        )
+        return out if any(k.startswith("sma") for k in out) else None
+    except Exception:  # noqa: BLE001 - SMA enrichment must never fail the run
+        return None
+
+
+def put_strike_has_ma_support(strike: float, spot: float, sma_data: dict[str, Any] | None) -> bool:
+    """
+    A short put strike is MA-supported when some SMA20/50/100 sits between the strike
+    and spot (the strike sells below an average-cost basis). No SMA data -> skip the
+    check (True).
+    """
+    if not sma_data:
+        return True
+    smas = [sma_data.get(k) for k in ("sma20", "sma50", "sma100")]
+    smas = [s for s in smas if isinstance(s, (int, float))]
+    if not smas:
+        return True
+    return any(strike <= s <= spot for s in smas)
+
+
+def call_strike_beyond_ma_resistance(strike: float, spot: float, sma_data: dict[str, Any] | None) -> bool:
+    """
+    A short call strike is MA-validated when it sits at or above the nearest SMA
+    resistance above spot. Spot above all SMAs -> any OTM strike passes.
+    No SMA data -> skip the check (True).
+    """
+    if not sma_data:
+        return True
+    smas = [sma_data.get(k) for k in ("sma20", "sma50", "sma100")]
+    smas = [s for s in smas if isinstance(s, (int, float))]
+    above = [s for s in smas if s >= spot]
+    if not above:
+        return True
+    return strike >= min(above)
 
 
 def compute_safety_floor(bundle: SymbolSignalBundle) -> float | None:
@@ -1249,6 +1363,8 @@ def generate_opportunities_for_symbol(
     conviction = compute_directional_conviction(bundle)
     conv_score = conviction["score"]
     conv_note = f" · dir {conviction['label']} {conv_score:+.0f}"
+    trend = compute_trend_validation(bundle)
+    trend_note = f" · trend {trend['label']}"
     ivr = vol.iv_rank if vol.iv_rank is not None else 35.0
     rsi = vol.rsi_14 if vol.rsi_14 is not None else 50.0
     term_7_30 = vol.term_ratio_7_30 if vol.term_ratio_7_30 is not None else 1.0
@@ -1278,6 +1394,7 @@ def generate_opportunities_for_symbol(
         and 32.0 <= rsi <= 60.0
         and bundle.dp_accumulating is not False
         and not flow_bull_veto
+        and trend["label"] != "BEAR"
         and safety_floor is not None
     )
 
@@ -1289,6 +1406,7 @@ def generate_opportunities_for_symbol(
             and p.delta is not None
             and 0.18 <= abs(p.delta) <= 0.28
             and p.strike <= safety_floor
+            and put_strike_has_ma_support(p.strike, spot, bundle.sma_data)
             and is_earnings_clear(report_date, date.fromisoformat(p.expiry), val.earnings_date, val.earnings_report_time)
         ]
         best_core_row: dict[str, Any] | None = None
@@ -1338,6 +1456,7 @@ def generate_opportunities_for_symbol(
                 and p.delta is not None
                 and 0.06 <= abs(p.delta) < 0.20
                 and p.strike <= safety_floor
+                and put_strike_has_ma_support(p.strike, spot, bundle.sma_data)
                 and is_earnings_clear(report_date, date.fromisoformat(p.expiry), val.earnings_date, val.earnings_report_time)
             ]
             best_tac_row: dict[str, Any] | None = None
@@ -1380,11 +1499,90 @@ def generate_opportunities_for_symbol(
                 results.append(best_tac_row)
 
     # ------------------------------------------------------------------
+    # 1C: SHORT_PUT (SP) — cash-secured put anchored at fair valuation
+    # Strike nearest the equity_valuation fair value (OTM only), DTE < 60.
+    # ------------------------------------------------------------------
+    ev_row = bundle.equity_valuation_row if isinstance(bundle.equity_valuation_row, dict) else None
+    fair_value = None
+    if ev_row:
+        v = safe_float(ev_row.get("value"))
+        lo, hi = safe_float(ev_row.get("value_low")), safe_float(ev_row.get("value_high"))
+        if v is None and lo is not None and hi is not None:
+            v = (lo + hi) / 2.0
+        if v and v > 0:
+            fair_value = v
+    val_age_days = None
+    if fair_value is not None:
+        post_dt = parse_iso_date(str((ev_row or {}).get("post_date") or "")[:10])
+        if post_dt:
+            val_age_days = (report_date - post_dt).days
+    if fair_value is not None and trend["label"] != "BEAR" and (val_age_days is None or val_age_days <= SP_MAX_VALUATION_AGE_DAYS):
+        # best short put per expiry: OTM strike closest to fair value, capped just above it
+        sp_candidates: list[tuple[OptionContractQuote, float]] = []
+        for p in puts:
+            if not (7 <= p.dte <= 59):
+                continue
+            if p.strike >= spot:
+                continue
+            if p.strike > fair_value * 1.02:
+                continue
+            if p.delta is not None and abs(p.delta) > 0.45:
+                continue
+            if (p.bid / p.strike) * (365.0 / p.dte) * 100.0 < 15.0:
+                continue
+            sp_candidates.append((p, abs(p.strike - fair_value)))
+        best_sp_row: dict[str, Any] | None = None
+        for p, dist in sorted(sp_candidates, key=lambda t: (t[1], -t[0].dte))[:1]:
+            if not is_earnings_clear(report_date, date.fromisoformat(p.expiry), val.earnings_date, val.earnings_report_time):
+                continue
+            adv_sweeps, whale_bids = evaluate_strike_flow_prints(trades, "put", p.strike)
+            if adv_sweeps > 0:
+                continue
+            ann_pct = (p.bid / p.strike) * (365.0 / p.dte) * 100.0
+            ror = p.bid / max(0.01, p.strike - p.bid)
+            row = _make_opportunity_row(
+                report_date=report_date,
+                run_id=run_id,
+                strategy="SHORT_PUT",
+                dte_bucket="SP",
+                bundle=bundle,
+                short_leg=p,
+                leg2=None,
+                leg2_role=None,
+                spread_width=None,
+                net_entry_price=p.bid,
+                entry_credit=p.bid,
+                entry_debit=None,
+                collateral=p.strike,
+                max_loss=p.strike - p.bid,
+                return_on_risk=ror,
+                annualized_pct=ann_pct,
+                break_even_low=p.strike - p.bid,
+                break_even_high=None,
+                safety_floor=safety_floor,
+                safety_ceiling=safety_ceiling,
+                adverse_sweeps=adv_sweeps,
+                confirming_bids=whale_bids,
+                notes=(
+                    f"SP anchored at fair value {fair_value:.2f} (dist {dist:.2f}, "
+                    f"post {ev_row.get('post_date')}, {ev_row.get('source')})"
+                    f" · trend {trend['label']}"
+                ),
+            )
+            row["fair_value"] = fair_value
+            row["fair_value_asof"] = ev_row.get("post_date")
+            if not best_sp_row or row["confidence_score"] > best_sp_row["confidence_score"]:
+                best_sp_row = row
+        if best_sp_row:
+            results.append(best_sp_row)
+
+    # ------------------------------------------------------------------
     # 2. WHEEL_CC (Stateless Covered Call Reference Board at/above GEX Call Wall)
     # ------------------------------------------------------------------
     reasons_joined = " ".join(bundle.verdict_reasons or []).lower()
     wheel_cc_regime_ok = (
         bundle.watchlist_category in {"core", "satellite"}
+        and trend["label"] != "BULL"
         and ivr >= 20.0
         and safety_ceiling is not None
         and (
@@ -1401,6 +1599,7 @@ def generate_opportunities_for_symbol(
             and c.delta is not None
             and 0.16 <= abs(c.delta) <= 0.28
             and c.strike >= safety_ceiling
+            and call_strike_beyond_ma_resistance(c.strike, spot, bundle.sma_data)
             and is_earnings_clear(report_date, date.fromisoformat(c.expiry), val.earnings_date, val.earnings_report_time)
         ]
         best_cc_row: dict[str, Any] | None = None
@@ -1449,6 +1648,7 @@ def generate_opportunities_for_symbol(
         jlaw_cls in {"valid", "watch"}
         and (bundle.jlaw_score is None or bundle.jlaw_score >= 8)
         and conviction["score"] >= DIRECTION_BULL_THRESHOLD
+        and trend["label"] != "BEAR"
         and ivr >= 30.0
         and bundle.dp_accumulating is not False
         and safety_floor is not None
@@ -1528,6 +1728,7 @@ def generate_opportunities_for_symbol(
     )
     strangle_regime_ok = (
         corridor_ok
+        and trend["label"] != "BEAR"
         and ivr >= 45.0
         and 38.0 <= rsi <= 62.0
         and verdict in {"mixed", "no-data"}
@@ -1614,6 +1815,7 @@ def generate_opportunities_for_symbol(
         and bundle.dp_accumulating is True
         and bundle.flow_label in {"bull", "strong_bull"}
         and not bundle.flow_conflicts
+        and trend["label"] != "BEAR"
         and ivr < 38.0
         and term_30_60 <= 1.08
     )
@@ -1694,6 +1896,7 @@ def generate_opportunities_for_symbol(
     # ------------------------------------------------------------------
     bcs_regime_ok = (
         conviction["score"] <= DIRECTION_BEAR_THRESHOLD
+        and trend["label"] != "BULL"
         and ivr >= 30.0
         and safety_ceiling is not None
     )
@@ -1855,7 +2058,7 @@ def evaluate_open_opportunity_row(
     # 3. Live GEX Wall Breach Alert
     if dte_now > 0 and not updated.get("defense_trigger_date"):
         if (
-            strategy in {"WHEEL_CSP", "BULL_PUT_SPREAD", "SHORT_STRANGLE"}
+            strategy in {"WHEEL_CSP", "SHORT_PUT", "BULL_PUT_SPREAD", "SHORT_STRANGLE"}
             and current_gex_put_wall is not None
             and short_strike > 0
             and current_gex_put_wall < short_strike
@@ -2238,8 +2441,11 @@ _CATEGORY_PRIORITY = {c: i for i, c in enumerate(WATCHLIST_CATEGORIES)}
 # (full collateral or 20%+ BPR) are capped at the remainder. If spreads are scarce,
 # the board shrinks rather than fabricating setups.
 SPREAD_STRATEGIES: frozenset[str] = frozenset({"BULL_PUT_SPREAD", "BEAR_CALL_SPREAD", "DIAGONAL_SPREAD"})
-SINGLE_STRATEGIES: frozenset[str] = frozenset({"WHEEL_CSP", "WHEEL_CC", "SHORT_STRANGLE"})
+SINGLE_STRATEGIES: frozenset[str] = frozenset({"WHEEL_CSP", "WHEEL_CC", "SHORT_STRANGLE", "SHORT_PUT"})
 SPREAD_MIN_SHARE: float = 0.6
+
+# SP fair-value anchors older than this are treated as stale (splits, thesis drift)
+SP_MAX_VALUATION_AGE_DAYS = 400
 
 
 def build_watchlist_universe(
@@ -2402,6 +2608,46 @@ def main(argv: list[str] | None = None) -> int:
         f"Conviction sources: stldc rows={len(stldc_by_sym)}, quant2 rows={len(quant2_by_sym)}"
     )
 
+    # Trend validation (watchlist-signal-board) + fair-value anchors (equity_valuation)
+    signal_board_by_sym: dict[str, dict[str, Any]] = {}
+    equity_valuation_by_sym: dict[str, dict[str, Any]] = {}
+    if sb is not None:
+        try:
+            latest_sbr = sb.select("watchlist-signal-board", params={"select": "run_date", "order": "run_date.desc", "limit": "1"})
+            if latest_sbr and latest_sbr[0].get("run_date"):
+                sbr_date = latest_sbr[0]["run_date"]
+                for r in sb.select("watchlist-signal-board", params={"select": "*", "run_date": f"eq.{sbr_date}"}):
+                    signal_board_by_sym[str(r.get("symbol") or "").upper()] = r
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARN: watchlist-signal-board prefetch failed: {exc}", file=sys.stderr)
+        try:
+            ev_rows = sb.select("equity_valuation", params={"select": "*"})
+            by_ticker: dict[str, list[dict[str, Any]]] = {}
+            for r in ev_rows:
+                by_ticker.setdefault(str(r.get("ticker") or "").upper(), []).append(r)
+            for tk, lst in by_ticker.items():
+                # freshest post wins; prefer an explicit value over a low/high midpoint
+                lst.sort(key=lambda r: (str(r.get("post_date") or ""), str(r.get("ingested_at") or "")), reverse=True)
+                equity_valuation_by_sym[tk] = lst[0]
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARN: equity_valuation prefetch failed: {exc}", file=sys.stderr)
+
+    # SMA20/50/100 levels from Yahoo daily closes (technical support for CSP/CC)
+    sma_by_sym: dict[str, dict[str, Any]] = {}
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _fetch_sma(sym: str) -> tuple[str, dict[str, Any] | None]:
+        return sym, fetch_sma_levels(sym)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for sym, sma in pool.map(_fetch_sma, sym_list):
+            if sma:
+                sma_by_sym[sym] = sma
+    print(
+        f"Trend/valuation sources: signal-board rows={len(signal_board_by_sym)}, "
+        f"equity_valuation tickers={len(equity_valuation_by_sym)}, SMA symbols={len(sma_by_sym)}"
+    )
+
     all_candidates: list[dict[str, Any]] = []
     chain_cache: dict[str, list[OptionContractQuote]] = {}
     spot_cache: dict[str, float] = {}
@@ -2535,6 +2781,9 @@ def main(argv: list[str] | None = None) -> int:
         # Directional-conviction sources (trend + 7D anticipation)
         bundle.stldc_row = stldc_by_sym.get(sym)
         bundle.quant2_row = quant2_by_sym.get(sym)
+        bundle.signal_board_row = signal_board_by_sym.get(sym)
+        bundle.equity_valuation_row = equity_valuation_by_sym.get(sym)
+        bundle.sma_data = sma_by_sym.get(sym)
 
         trades = uw.get_option_trades(sym, limit=120)
         if not bundle.spot_price and trades:

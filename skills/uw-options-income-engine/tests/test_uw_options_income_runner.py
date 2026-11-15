@@ -672,6 +672,85 @@ class RunnerTestSuite(unittest.TestCase):
     pass
 
 
+def test_short_put_anchored_at_fair_value():
+    # fair value 92.0 with spot 100 -> the 92 strike (closest OTM to fair) is selected
+    b = base_bundle(equity_valuation_row={"ticker": "ABC", "value": 92.0, "post_date": "2026-11-01", "source": "test-digest"})
+    chain = [
+        q("ABC", EXP_21, "P", 97.0, 2.00, 2.10, -0.30),
+        q("ABC", EXP_21, "P", 92.0, 1.20, 1.30, -0.20),
+        q("ABC", EXP_21, "P", 87.0, 0.60, 0.70, -0.12),
+    ]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    sp = [x for x in rows if x["strategy"] == "SHORT_PUT"]
+    assert len(sp) == 1
+    assert sp[0]["short_strike"] == 92.0  # closest to fair value among strikes <= 93.84 cap
+    assert sp[0]["dte_bucket"] == "SP"
+    assert sp[0]["annualized_pct"] >= 15.0
+    assert "fair value 92.00" in sp[0]["notes"]
+
+
+def test_short_put_skipped_when_trend_validated_bear():
+    b = base_bundle(
+        equity_valuation_row={"ticker": "ABC", "value": 92.0, "post_date": "2026-11-01", "source": "test-digest"},
+        signal_board_row={"consensus": "BEAR", "run_date": "2026-11-13"},
+        stldc_row={"structure": "BEAR", "st_dir": "BEAR", "ldc_signal": "SHORT", "stage": "BEAR-CONFIRM"},
+    )
+    chain = [q("ABC", EXP_21, "P", 92.0, 1.20, 1.30, -0.20)]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    assert not [x for x in rows if x["strategy"] == "SHORT_PUT"]
+    # and the bullish CSP regime is vetoed by the same trend validation
+    assert not [x for x in rows if x["strategy"] == "WHEEL_CSP"]
+
+
+def test_sma_support_gates_for_csp_and_cc():
+    # base floor = min(jlaw_stop 94, gex_put_wall 95) = 94, so CSP strikes must be <= 94
+    # CSP: spot 100, SMA20=93 -> strikes <= 93 have MA support
+    b = base_bundle(sma_data={"sma20": 93.0, "sma50": 91.0, "sma100": 88.0})
+    chain = [
+        q("ABC", EXP_32, "P", 93.0, 1.65, 1.75, -0.25),  # <= 93 supported
+        q("ABC", EXP_32, "P", 90.0, 1.85, 1.95, -0.19),  # supported
+    ]
+    rows = r.generate_opportunities_for_symbol(TODAY, "t", b, chain, [])
+    csp = [x for x in rows if x["strategy"] == "WHEEL_CSP"]
+    assert len(csp) == 1 and csp[0]["short_strike"] in (93.0, 90.0)
+
+    # spot above every SMA -> no MA support below spot -> strike rejected
+    b2 = base_bundle(sma_data={"sma20": 89.0, "sma50": 87.0, "sma100": 85.0})
+    rows2 = r.generate_opportunities_for_symbol(TODAY, "t", b2, [
+        q("ABC", EXP_32, "P", 90.0, 1.85, 1.95, -0.19),  # 90 > every SMA -> no MA support
+    ], [])
+    assert not [x for x in rows2 if x["strategy"] == "WHEEL_CSP"]
+
+    # CC: base ceiling = max(gex_call_wall 108, jlaw_target 112) = 112
+    b3 = base_bundle(sma_data={"sma20": 103.0, "sma50": 101.0, "sma100": 98.0})
+    b3.volatility.rsi_14 = 62.0  # CC regime needs RSI >= 60 (or a bearish trigger)
+    rows3 = r.generate_opportunities_for_symbol(TODAY, "t", b3, [
+        q("ABC", EXP_32, "C", 112.0, 1.40, 1.50, 0.24),  # 112 >= sma20 103 -> beyond resistance
+    ], [])
+    assert len([x for x in rows3 if x["strategy"] == "WHEEL_CC"]) == 1
+
+    # a call strike inside the SMA band (below sma20 115) is rejected
+    b4 = base_bundle(sma_data={"sma20": 120.0, "sma50": 118.0, "sma100": 115.0})  # nearest resistance 115 > strike 112
+    b4.volatility.rsi_14 = 62.0
+    rows4 = r.generate_opportunities_for_symbol(TODAY, "t", b4, [
+        q("ABC", EXP_32, "C", 112.0, 1.40, 1.50, 0.24),
+    ], [])
+    assert not [x for x in rows4 if x["strategy"] == "WHEEL_CC"]
+
+
+def test_trend_validation_labels():
+    b = base_bundle(signal_board_row={"consensus": "BULL", "run_date": "2026-11-13"},
+                    stldc_row={"structure": "BULL", "st_dir": "BULL", "ldc_signal": "LONG", "stage": "BULL-CONFIRM"})
+    assert r.compute_trend_validation(b)["label"] == "BULL"
+    b2 = base_bundle(signal_board_row={"consensus": "BULL", "run_date": "2026-11-13"},
+                     stldc_row={"structure": "BEAR", "st_dir": "BEAR", "ldc_signal": "SHORT", "stage": "BEAR-CONFIRM"})
+    assert r.compute_trend_validation(b2)["label"] == "NEUT"  # sources disagree -> no label
+    b3 = base_bundle(signal_board_row={"consensus": "BEAR", "run_date": "2026-11-13"})
+    assert r.compute_trend_validation(b3)["label"] == "BEAR"  # missing stldc defers to the board
+
+
+
+
 for _name, _fn in list(globals().items()):
     if _name.startswith("test_") and callable(_fn):
         setattr(RunnerTestSuite, _name, staticmethod(_fn))
