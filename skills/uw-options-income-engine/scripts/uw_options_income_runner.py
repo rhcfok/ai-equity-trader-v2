@@ -1538,6 +1538,13 @@ def generate_opportunities_for_symbol(
     if fair_value is not None and trend["label"] != "BEAR":
         post_dt = parse_iso_date(fair_asof) if fair_asof else None
         val_age_days = (report_date - post_dt).days if post_dt else None
+        fund_asof = str((ud_row or {}).get("fundamentals_as_of_date") or "")[:10] or None
+        est_asof = str((ud_row or {}).get("estimates_as_of_date") or "")[:10] or None
+        vintage = ""
+        if fund_asof:
+            vintage += f", fund {fund_asof}"
+        if est_asof:
+            vintage += f", est {est_asof}"
         if val_age_days is None or val_age_days <= SP_MAX_VALUATION_AGE_DAYS:
             bb_in_band = buy_below is not None and (SP_BUFFER_LOW * spot) <= buy_below <= (SP_BUFFER_HIGH * spot)
             close_to_fair = spot <= fair_value * SP_FAIR_CLOSE_FACTOR
@@ -1601,12 +1608,15 @@ def generate_opportunities_for_symbol(
                     confirming_bids=whale_bids,
                     notes=(
                         f"SP {target_desc} strike {p.strike:.2f} "
-                        f"(anchor {anchor_desc} {fair_value:.2f}, dist {dist:.2f}, age {val_age_days}d)"
+                        f"(anchor {anchor_desc} {fair_value:.2f}, dist {dist:.2f}, age {val_age_days}d{vintage})"
                         f" · trend {trend['label']}"
                     ),
                 )
                 row["fair_value"] = fair_value
                 row["fair_value_asof"] = fair_asof
+                row["fair_value_source"] = anchor_desc
+                row["fair_value_fundamentals_asof"] = fund_asof
+                row["fair_value_estimates_asof"] = est_asof
                 if not best_sp_row or row["confidence_score"] > best_sp_row["confidence_score"]:
                     best_sp_row = row
             if best_sp_row:
