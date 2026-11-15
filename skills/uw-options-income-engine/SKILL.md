@@ -1,11 +1,11 @@
 ---
 name: uw-options-income-engine
-description: Run a stateless multi-strategy options income engine combining option-davis and put-option-strategy with Unusual Whales earnings/financial valuation, IV term-structure, RSI(14), GEX walls, Dark Pool levels, a combined unusual-flow score (verdict + premium tilt + 3-day persistence + dark pool, with conflict flags), and strike-level sweep vetoes across Wheel (CSP + CC), Bull Put Spread, Short Strangle, Diagonal Spread, and Bear Call Spread.
+description: Run a stateless multi-strategy options income engine combining option-davis and put-option-strategy with Unusual Whales earnings/financial valuation, IV term-structure, RSI(14), GEX walls, Dark Pool levels, a combined unusual-flow score, a fused directional-conviction model (trade-stldc-v2 trend + quant2_leaderboard 7-session anticipation + flow) plus watchlist-signal-board trend validation and strike-level sweep vetoes across Wheel (CSP + CC), Short Put (SP, fair-value anchored), Bull Put Spread, Short Strangle, Diagonal Spread, and Bear Call Spread, with a spread-first board composition quota.
 ---
 
 # UW Options Income Engine (`uw-options-income-engine`)
 
-Use this skill when generating, auditing, or extending the daily **stateless multi-strategy options income board** (`WHEEL_CSP`, `WHEEL_CC`, `BULL_PUT_SPREAD`, `SHORT_STRANGLE`, `DIAGONAL_SPREAD`, `BEAR_CALL_SPREAD`) powered by Unusual Whales REST endpoints and the Supabase trading stack (`watchlist`, `trade-jlaw-v2`, `flow_verdict_rows`, `option_flow_symbol_signals`, `gex_snapshot`, `darkpool_symbol_daily`).
+Use this skill when generating, auditing, or extending the daily **stateless multi-strategy options income board** (`WHEEL_CSP`, `WHEEL_CC`, `SHORT_PUT`, `BULL_PUT_SPREAD`, `SHORT_STRANGLE`, `DIAGONAL_SPREAD`, `BEAR_CALL_SPREAD`) powered by Unusual Whales REST endpoints and the Supabase trading stack (`watchlist`, `trade-jlaw-v2`, `flow_verdict_rows`, `option_flow_symbol_signals`, `gex_snapshot`, `darkpool_symbol_daily`, `trade-stldc-v2`, `quant2_leaderboard`, `watchlist-signal-board`, `equity_valuation_uw_daily`, `equity_valuation`).
 
 Read `references/methodology.md` before changing routing gates, valuation tiers, strike selection, confidence scoring, or lifecycle rules.
 
@@ -43,6 +43,17 @@ Read `references/methodology.md` before changing routing gates, valuation tiers,
    - Compute `uw_ttm_eps`, `uw_pe_ratio`, `uw_eps_growth_yoy_pct`, `uw_peg_ratio`, `uw_latest_surprise_pct`, and `uw_valuation_tier` (`cheap`, `fair_low`, `fair_high`, `expensive`, `not_meaningful`) deterministically via `compute_uw_valuation_context()` in `scripts/uw_options_income_runner.py`.
 
 ---
+
+## 2026-11-15 Engine Update — read before touching gates
+
+Six changes landed after the flow-composite release; the routing matrix below reflects them:
+
+1. **Trend validation on every strategy:** `watchlist-signal-board.consensus` (itself a fusion of stldc + J Law chart/yahoo + flow + quant2 + technical scan) is the primary trend signal; `trade-stldc-v2` votes are the second opinion. Bullish structures (CSP/SP/BPS/DIAG/SS) are vetoed when the validation reads BEAR; bearish structures (CC/BCS) when it reads BULL; NEUT or missing sources never veto.
+2. **Directional conviction for spreads** replaces verdict-only direction gates: 40% trade-stldc-v2 trend votes + 30% quant2_leaderboard 7-session anticipation (presence x walk-forward hit rate, bullish-only) + 30% flow_composite. BPS needs >= +20, BCS <= -20. Sign disagreements surface as DIRECTION_CONFLICT.
+3. **New `SHORT_PUT` (SP):** cash-secured put anchored at fair value — anchor resolution uses `equity_valuation_uw_daily` (fair_value, else buy_below; the daily table COVERS its tickers and posts never override it), falling back to `equity_valuation` 'fair value'/'buy_below' posts only for uncovered tickers. Price targets are never anchors. Strike rules: anchor = min(fair_value, spot); buy_below inside the 10-20% OTM band -> strike = buy_below; spot within 10% of fair (or buy_below too far) -> strike = spot x 0.85; spot > 10% above fair -> strike = fair value itself. DTE 7-59, annualized >= 15%, anchors older than 400 days skipped. Provenance (source, post/as-of date, fundamentals/estimates vintage) is stamped in notes and the `fair_value_*` columns.
+4. **SMA support for CSP/CC strikes:** SMA20/50/100 computed from 1y of Yahoo daily closes. A put strike must sit below some SMA between it and spot; a call strike must clear the nearest SMA resistance above spot. Missing data skips the check.
+5. **Board composition quota:** spread structures (BPS/BCS/DIAG) get priority; single-leg structures (CSP/CC/SP/SS) are capped at 40% of top-N. If spreads are scarce the board shrinks — never fabricate.
+6. **Report dates are the data session:** the runner detects the session date from the UW series (prints "Report date aligned to data session" when it differs from the wall clock), so pre-open runs are stamped with the prior session, and same-session re-runs merge on identical opportunity keys. The jlaw lookup also tie-breaks duplicate same-day rows by highest jlaw_score.
 
 ## Stateless Strategy Routing Matrix
 

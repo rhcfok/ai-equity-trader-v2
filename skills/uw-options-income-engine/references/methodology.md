@@ -99,3 +99,32 @@ The runner includes a `--track-open` pass (enabled by default in daily runs) tha
    - If the latest `gex_put_wall` drops below `short_strike` (on put structures) or `spot` breaches `short_strike` with adverse sweeps, sets `defense_trigger_date` and `defense_reason = 'GEX_WALL_BREACH'` so the daily report highlights immediate roll/close candidates before 21 DTE.
 4. **Expiry Settlement:**
    - On or after `short_expiry`, settles remaining open rows at intrinsic value (`EXPIRED_WORTHLESS` -> `win = true`, or `LOST` -> `win = false` if net P&L < 0).
+
+## 6. Directional Conviction, Trend Validation, SP Anchoring & SMA Support (2026-11-15)
+
+### 6.1 Trend validation (all strategies)
+
+`watchlist-signal-board` publishes a per-symbol daily `consensus` (BULL/BEAR/NEUT) fused from stldc, J Law chart/yahoo, flow verdict, quant2 and a technical scan. `trade-stldc-v2` votes (structure, st_dir, ldc_signal, stage) are the second opinion. Validation label: BULL when the board reads BULL and stldc is not BEAR-majority; BEAR when the board reads BEAR and stldc is not BULL-majority; otherwise NEUT. Veto map: bullish structures (WHEEL_CSP, SHORT_PUT, BULL_PUT_SPREAD, DIAGONAL_SPREAD, SHORT_STRANGLE) blocked on BEAR; bearish structures (WHEEL_CC, BEAR_CALL_SPREAD) blocked on BULL; NEUT never vetoes; missing sources never veto.
+
+### 6.2 Directional conviction (spreads)
+
+`compute_directional_conviction` fuses, in [-100, +100]: 0.40 x stldc vote score (share of BULL minus BEAR votes across structure/st_dir/ldc_signal/stage, scaled to +/-100), 0.30 x quant2 7-session anticipation (presence on the latest `quant2_leaderboard` run scaled by `score_hist_freq`; 0.45-0.70 maps to 40-100; absence = 0, bullish-only evidence), 0.30 x flow_composite. BULL_PUT_SPREAD requires >= +20; BEAR_CALL_SPREAD requires <= -20. Sources with |score| >= 20 that disagree in sign flag DIRECTION_CONFLICT (surfaced, never netted).
+
+### 6.3 SHORT_PUT (SP) anchoring
+
+Anchor resolution order — price targets are never anchors:
+1. `equity_valuation_uw_daily`: newest row within 14 days carrying `fair_value` (else `buy_below`). The daily table COVERS its tickers: a covered ticker with no anchor gets no SP and never falls back to posts.
+2. Uncovered tickers: `equity_valuation` posts of type 'fair value' or 'buy_below' (freshest post; type-priority fair value > buy_below).
+Anchor = min(fair_value, spot) — never above spot. Anchors older than 400 days are stale and skipped. Strike target: buy_below when it lands inside the 10-20% OTM band (0.80-0.90 x spot); spot x 0.85 when spot is within 10% of fair or buy_below is too far; fair_value itself when spot is more than 10% above fair. Candidates: OTM puts, DTE 7-59, annualized >= 15%, delta <= 0.45, sweep-vetoed, earnings-clear. Provenance columns: fair_value, fair_value_asof, fair_value_source, fair_value_fundamentals_asof, fair_value_estimates_asof.
+
+### 6.4 SMA support (WHEEL_CSP / WHEEL_CC)
+
+SMA20/50/100 from 1y of Yahoo daily closes (`fetch_sma_levels`, thread-pooled per run). A short put strike must have some SMA S with strike <= S <= spot (selling below an average-cost basis); a short call strike must be >= the nearest SMA above spot (beyond MA resistance); spot above/below all SMAs passes the respective side. Missing SMA data skips the gate.
+
+### 6.5 Board composition quota
+
+Spread structures (BULL_PUT_SPREAD, BEAR_CALL_SPREAD, DIAGONAL_SPREAD) fill the board first; single-leg structures (WHEEL_CSP, WHEEL_CC, SHORT_PUT, SHORT_STRANGLE) are capped at 40% of top-N. Scarcity shrinks the board; nothing is fabricated.
+
+### 6.6 Data-session date stamping
+
+The report date is detected from the latest UW series date (RSI/IV rows), not the wall clock, so pre-open runs stamp the prior session and same-session re-runs merge on identical opportunity keys. An explicit --date overrides detection.
