@@ -213,3 +213,8 @@ alter table public."uw-option-opportunities"
   add column if not exists flow_label text,
   add column if not exists flow_conflicts jsonb not null default '[]'::jsonb,
   add column if not exists flow_components jsonb not null default '{}'::jsonb;
+
+-- 2026-11-15 migration (add_uw_opp_fair_value): SP fair-value anchor provenance
+alter table public."uw-option-opportunities"
+  add column if not exists fair_value double precision,
+  add column if not exists fair_value_asof date;
