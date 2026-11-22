@@ -54,4 +54,4 @@ python skills/credit-option-proposal/scripts/part41_strategy_top5.py --indir <ou
 
 ## Notion
 
-页面：J Law 双管线 × Unusual Whales（id `3f5b8852-cf00-8035-916d-d12bae2a3dd2`）。新当日顶层 `<toggle>`（纯 `<toggle>`，不带 heading 属性；`insert_content` position=end）；与 market-briefing 的完整报告 toggle 分开，不混排。
+页面：AI generated option idea (v2)（id `420b8852-cf00-80bd-8a14-c821e095d049`，ai-trader-v2 下）。新当日顶层 `<toggle>`（纯 `<toggle>`，不带 heading 属性；`insert_content` position=end），标题 `Credit option proposal — <YYYY-MM-DD>`；part4_v2.md 直接作 toggle 正文；同一日期已存在同题 toggle 则只替换不重复；不触碰其他日期块。
