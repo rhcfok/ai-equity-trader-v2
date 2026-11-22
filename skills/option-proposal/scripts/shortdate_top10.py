@@ -47,9 +47,17 @@ def main() -> None:
         if st.get("darkpool_duplicate_of_prior_day"):
             print("NOTE darkpool latest snapshot duplicates prior day (DP treated as missing evidence)")
     if not (args.batch_date and args.vdate):
-        stf = json.loads((indir / "fetch_state.json").read_text(encoding="utf-8"))
-        args.batch_date = args.batch_date or stf["batch_date"]
-        args.vdate = args.vdate or stf["vdate"]
+        if (indir / "fetch_state.json").exists():
+            stf = json.loads((indir / "fetch_state.json").read_text(encoding="utf-8"))
+            args.batch_date = args.batch_date or stf["batch_date"]
+            args.vdate = args.vdate or stf["vdate"]
+        else:
+            em_rows = json.loads((indir / "em_scores.json").read_text(encoding="utf-8"))
+            args.batch_date = args.batch_date or max((str(x.get("report_date"))[:10] for x in em_rows), default=None)
+            rc_files = sorted(indir.glob("flow_reconcile_*.json"))
+            args.vdate = args.vdate or (rc_files[-1].stem.replace("flow_reconcile_", "") if rc_files else None)
+    if not (args.batch_date and args.vdate):
+        raise SystemExit("cannot infer --batch-date/--vdate; pass them explicitly or run without --offline")
     BATCH = args.batch_date
     OUT = indir
     vdate = args.vdate

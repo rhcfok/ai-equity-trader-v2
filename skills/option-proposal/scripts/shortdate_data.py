@@ -104,7 +104,12 @@ def fetch_latest(indir: Path, creds: tuple[str, str] | None = None) -> dict:
     # 3) freshest verdict date + reconciliation via flow_reconcile.py subprocess
     vdate = latest_scalar("flow-verdicts", "verdict_date")[0]
     state["vdate"] = vdate
-    rc = subprocess.run([sys.executable, str(SCRIPT_DIR / "flow_reconcile.py"),
+    fr_candidates = [SCRIPT_DIR / "flow_reconcile.py",
+                     SCRIPT_DIR.parents[1] / "daily-trading-briefing" / "scripts" / "flow_reconcile.py"]
+    fr = next((c for c in fr_candidates if c.exists()), None)
+    if fr is None:
+        raise SystemExit("flow_reconcile.py not found (looked in skill dir + daily-trading-briefing/scripts)")
+    rc = subprocess.run([sys.executable, str(fr),
                          "--date", vdate, "--out", str(indir)],
                         capture_output=True, text=True, timeout=300,
                         env=dict(os.environ,

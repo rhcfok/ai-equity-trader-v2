@@ -633,7 +633,13 @@ Reconciliation inputs met their configured freshness cadence. The material withh
         custom_income = render_income_board(json.loads(Path(args.income_board_manifest).read_text(encoding="utf-8"))).strip()
     elif args.income_board_markdown:
         custom_income = Path(args.income_board_markdown).read_text(encoding="utf-8").strip()
-    if not custom_income:
+    if args.no_options:
+        custom_income = (
+            "## Part 4 · 期权提案 | Options Proposals\n"
+            "<callout icon=\"ℹ️\" color=\"gray_bg\">本报告不含期权提案。期权提案由 option-proposal 技能单独产出与发布（short-date Top-10 与分策略 Top-5）。"
+            "This report excludes option proposals; they are compiled and published separately by the option-proposal skill.</callout>"
+        )
+    elif not custom_income:
         raise ValueError("Explicit selected-board manifest or validated withheld Part 4 Markdown required; raw source-ledger fallback disabled")
     if custom_income:
         if not custom_income.startswith("## Part 4 ·"):
@@ -668,10 +674,11 @@ def main() -> int:
     parser.add_argument("--reconcile-json", required=True)
     parser.add_argument("--fragility-notes")
     parser.add_argument("--income-board-markdown", help="explicit validated selected/withheld Part 4 Markdown; raw source extracts omitted by default")
+    parser.add_argument("--no-options", action="store_true", help="market-briefing mode: emit Parts 1/2/3/5/6 only; Part 4 is produced by the option-proposal skill")
     parser.add_argument("--income-board-manifest", help="validated ranked30/20/50 board manifest; preferred over pre-rendered Markdown")
     parser.add_argument("--retain-income-ledgers", action="store_true", help="append full raw income-source extracts to custom Part 4; default is concise selected-board output")
     args = parser.parse_args()
-    if not args.income_board_markdown and not args.income_board_manifest:
+    if not args.no_options and not args.income_board_markdown and not args.income_board_manifest:
         parser.error("Provide --income-board-manifest or explicit selected/withheld --income-board-markdown; no raw-ledger fallback")
     try:
         report, snapshot = build(args)
