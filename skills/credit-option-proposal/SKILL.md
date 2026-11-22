@@ -1,9 +1,9 @@
 ---
-name: option-proposal
-description: 产出期权交易提案（short-date Top-10 全量榜 + SP/SC/BPS/BCS 分策略 Top-5 置信度提案）。基于 em-probability（gaussian-drift-off-v1）排序，六层证据加权置信度（jlaw / flow-verdict / unusual flow / dark pool / quant2 / stldc），估值为参考列不否决。触发：期权提案 / option proposal / 分策略 Top-5 / short-date 提案。
+name: credit-option-proposal
+description: 产出信用策略期权交易提案（short-date Top-10 全量榜 + SP/SC/BPS/BCS 分策略 Top-5 置信度提案，全部为卖方收信用结构）。基于 em-probability（gaussian-drift-off-v1）排序，六层证据加权置信度（jlaw / flow-verdict / unusual flow / dark pool / quant2 / stldc），估值为参考列不否决。触发：期权提案 / option proposal / credit 提案 / credit option proposal / 分策略 Top-5 / short-date 提案。（原名 option-proposal，2026-11-22 更名）
 ---
 
-# option-proposal：期权交易提案
+# credit-option-proposal：信用策略期权交易提案
 
 从 daily-trading-briefing 拆分而来（2026-11-22）。市场状态与方向性计划见 [market-briefing](../market-briefing/SKILL.md)。**全部只读：无订单、无 DB 写入（em_score 重算除外，见运行顺序）。**
 
@@ -20,10 +20,10 @@ description: 产出期权交易提案（short-date Top-10 全量榜 + SP/SC/BPS/
 python skills/em-expected-move/scripts/em_score.py
 
 # ② Top-10 全量榜（fetch-latest：自动定位最新已评分批 / verdicts / stldc / quant2 / 暗池 / 异动流 / 估值，只读 GET + 分页）
-python skills/option-proposal/scripts/shortdate_top10.py --indir <outdir>
+python skills/credit-option-proposal/scripts/shortdate_top10.py --indir <outdir>
 
 # ③ 分策略 Top-5 置信度提案（估值=参考列不否决；含 watchlist-signal-board scan score 参考列）
-python skills/option-proposal/scripts/part41_strategy_top5.py --indir <outdir> --out <outdir>/part4_v2.md
+python skills/credit-option-proposal/scripts/part41_strategy_top5.py --indir <outdir> --out <outdir>/part4_v2.md
 #    --offline 模式：复用已有快照（日期自动从 em_scores.json / flow_reconcile_*.json 推断）
 ```
 

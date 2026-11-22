@@ -7,7 +7,7 @@ description: 每个交易日用确定性 0–100 regime 评分（scripts/regime_
 
 > **2026-11-22 拆分 Split**：本技能已拆分为两个独立技能（本 SKILL.md 保留为共享脚本与约定的上游参考）：
 > ① **market-briefing**（[skills/market-briefing/SKILL.md](../market-briefing/SKILL.md)）——编译市场简报 Part 1/2/3（含 3.0b/3.4）/5/6，不含期权；builder 用 `--no-options`。
-> ② **option-proposal**（[skills/option-proposal/SKILL.md](../option-proposal/SKILL.md)）——期权提案：short-date Top-10 + SP/SC/BPS/BCS 分策略 Top-5 置信度（估值=参考列 + scan score）；脚本已迁移至 `skills/option-proposal/scripts/`。
+> ② **credit-option-proposal**（[skills/credit-option-proposal/SKILL.md](../credit-option-proposal/SKILL.md)；原名 option-proposal，2026-11-22 更名）——期权提案：short-date Top-10 + SP/SC/BPS/BCS 分策略 Top-5 置信度（估值=参考列 + scan score）；脚本已迁移至 `skills/credit-option-proposal/scripts/`。
 > 期权收入计划（Part 4 权威规则）保留在本文件 Part 4 节。
 
 把 J Law 双管线结果与期权流判读整合成中英双语、研究用途的交易决策简报；只生成条件性人工计划，绝不创建、传送或提交订单。
